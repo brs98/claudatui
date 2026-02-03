@@ -79,6 +79,17 @@ impl ConversationGroup {
             Self::Ungrouped { conversations, .. } => conversations,
         }
     }
+
+    /// Get the project path for this group (for spawning new conversations)
+    pub fn project_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Worktree { conversations, .. }
+            | Self::Directory { conversations, .. }
+            | Self::Ungrouped { conversations, .. } => {
+                conversations.first().map(|c| c.project_path.clone())
+            }
+        }
+    }
 }
 
 /// Extract group info from a project path

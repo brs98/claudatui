@@ -5,15 +5,17 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
+use crate::session::RunningSession;
+
 /// Terminal pane widget for displaying PTY output
 pub struct TerminalPane<'a> {
-    parser: Option<&'a vt100::Parser>,
+    session: Option<&'a RunningSession>,
     focused: bool,
 }
 
 impl<'a> TerminalPane<'a> {
-    pub fn new(parser: Option<&'a vt100::Parser>, focused: bool) -> Self {
-        Self { parser, focused }
+    pub fn new(session: Option<&'a RunningSession>, focused: bool) -> Self {
+        Self { session, focused }
     }
 }
 
@@ -25,17 +27,27 @@ impl<'a> Widget for TerminalPane<'a> {
             Style::default().fg(Color::DarkGray)
         };
 
+        // Get scroll offset from session if available
+        let scroll_offset = self.session.map(|s| s.scroll_offset).unwrap_or(0);
+
+        // Show scroll indicator in title when scrolled
+        let title = if scroll_offset > 0 {
+            format!(" Claude Code [SCROLLED: -{}] ", scroll_offset)
+        } else {
+            " Claude Code ".to_string()
+        };
+
         let block = Block::default()
-            .title(" Claude Code ")
+            .title(title)
             .borders(Borders::ALL)
             .border_style(border_style);
 
         let inner_area = block.inner(area);
         block.render(area, buf);
 
-        match self.parser {
-            Some(parser) => {
-                render_vt100_screen(parser.screen(), inner_area, buf);
+        match self.session {
+            Some(session) => {
+                render_vt100_screen(session.vt_parser.screen(), inner_area, buf, session.scroll_offset);
             }
             None => {
                 // Show placeholder when no PTY is active
@@ -50,9 +62,11 @@ impl<'a> Widget for TerminalPane<'a> {
     }
 }
 
-fn render_vt100_screen(screen: &vt100::Screen, area: Rect, buf: &mut Buffer) {
+fn render_vt100_screen(screen: &vt100::Screen, area: Rect, buf: &mut Buffer, scroll_offset: usize) {
     let (rows, cols) = screen.size();
 
+    // The vt100 library's set_scrollback was already called by the App,
+    // so screen.cell() returns the appropriate visible rows
     for row in 0..rows.min(area.height) {
         let y = area.y + row;
 
@@ -70,14 +84,16 @@ fn render_vt100_screen(screen: &vt100::Screen, area: Rect, buf: &mut Buffer) {
         }
     }
 
-    // Render cursor if visible
-    let (cursor_row, cursor_col) = screen.cursor_position();
-    let cursor_x = area.x + cursor_col;
-    let cursor_y = area.y + cursor_row;
+    // Only render cursor when at live view (not scrolled)
+    if scroll_offset == 0 {
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let cursor_x = area.x + cursor_col;
+        let cursor_y = area.y + cursor_row;
 
-    if cursor_y < area.y + area.height && cursor_x < area.x + area.width {
-        if let Some(cell) = buf.cell_mut((cursor_x, cursor_y)) {
-            cell.set_style(Style::default().bg(Color::White).fg(Color::Black));
+        if cursor_y < area.y + area.height && cursor_x < area.x + area.width {
+            if let Some(cell) = buf.cell_mut((cursor_x, cursor_y)) {
+                cell.set_style(Style::default().bg(Color::White).fg(Color::Black));
+            }
         }
     }
 }

@@ -2,6 +2,7 @@ mod app;
 mod claude;
 mod event;
 mod pty;
+mod session;
 mod ui;
 
 use std::io;
@@ -10,7 +11,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
+        KeyModifiers, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -66,8 +70,11 @@ fn main() -> Result<()> {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
-        // Process PTY output
-        app.process_pty_output();
+        // Process output from ALL running sessions (not just active)
+        app.process_all_sessions();
+
+        // Check all sessions for dead PTYs and clean up
+        app.check_all_session_status();
 
         // Draw UI
         terminal.draw(|f| draw_ui(f, app))?;
@@ -81,6 +88,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     if handle_key_event(app, key)? {
                         break;
                     }
+                }
+                Event::Mouse(mouse) => {
+                    handle_mouse_event(app, mouse);
                 }
                 Event::Resize(w, h) => {
                     app.resize(w, h)?;
@@ -104,8 +114,12 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
         (KeyCode::Char('q'), KeyModifiers::NONE) if app.focus == Focus::Sidebar => {
             return Ok(true);
         }
-        (KeyCode::Tab, KeyModifiers::NONE) => {
-            app.toggle_focus();
+        (KeyCode::Left, KeyModifiers::CONTROL) => {
+            app.set_focus(Focus::Sidebar);
+            return Ok(false);
+        }
+        (KeyCode::Right, KeyModifiers::CONTROL) => {
+            app.set_focus(Focus::Terminal);
             return Ok(false);
         }
         _ => {}
@@ -134,12 +148,62 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<bool> {
 }
 
 fn handle_terminal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    // Get page size from active session, or use default
+    let page_size = app
+        .get_active_session()
+        .map(|s| {
+            let (rows, _) = s.vt_parser.screen().size();
+            rows.saturating_sub(2) as usize
+        })
+        .unwrap_or(20);
+
+    let is_scroll_locked = app.is_scroll_locked();
+
+    match (key.code, key.modifiers) {
+        (KeyCode::PageUp, _) => {
+            app.scroll_up(page_size);
+            return Ok(false);
+        }
+        (KeyCode::PageDown, _) => {
+            app.scroll_down(page_size);
+            return Ok(false);
+        }
+        (KeyCode::Char('G'), KeyModifiers::SHIFT) if is_scroll_locked => {
+            app.scroll_to_bottom();
+            return Ok(false);
+        }
+        (KeyCode::Esc, _) if is_scroll_locked => {
+            app.scroll_to_bottom();
+            return Ok(false);
+        }
+        _ => {}
+    }
+
     // Convert key event to bytes and send to PTY
     let bytes = key_to_bytes(key);
     if !bytes.is_empty() {
         app.write_to_pty(&bytes)?;
     }
     Ok(false)
+}
+
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
+    // Only handle mouse scroll when terminal is focused
+    if app.focus != Focus::Terminal {
+        return;
+    }
+
+    const SCROLL_LINES: usize = 3;
+
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            app.scroll_up(SCROLL_LINES);
+        }
+        MouseEventKind::ScrollDown => {
+            app.scroll_down(SCROLL_LINES);
+        }
+        _ => {}
+    }
 }
 
 fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
@@ -154,6 +218,7 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
         (KeyCode::Enter, _) => vec![b'\r'],
         (KeyCode::Backspace, _) => vec![0x7f],
         (KeyCode::Tab, _) => vec![b'\t'],
+        (KeyCode::BackTab, _) => vec![0x1b, b'[', b'Z'],
         (KeyCode::Esc, _) => vec![0x1b],
         (KeyCode::Up, _) => vec![0x1b, b'[', b'A'],
         (KeyCode::Down, _) => vec![0x1b, b'[', b'B'],
@@ -171,17 +236,21 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
 fn draw_ui(f: &mut Frame, app: &mut App) {
     let (sidebar_area, terminal_area, help_area) = create_layout_with_help(f.area());
 
-    // Draw sidebar
-    let sidebar = Sidebar::new(&app.groups, app.focus == Focus::Sidebar);
+    // Collect running session IDs for sidebar display
+    let running_sessions = app.running_session_ids();
+
+    // Draw sidebar with running session indicators and ephemeral sessions
+    let sidebar = Sidebar::new(
+        &app.groups,
+        app.focus == Focus::Sidebar,
+        &running_sessions,
+        &app.ephemeral_sessions,
+    );
     f.render_stateful_widget(sidebar, sidebar_area, &mut app.sidebar_state);
 
-    // Draw terminal pane
-    let parser_ref = if app.pty.is_some() {
-        Some(&app.vt_parser)
-    } else {
-        None
-    };
-    let terminal_pane = TerminalPane::new(parser_ref, app.focus == Focus::Terminal);
+    // Draw terminal pane with active session
+    let active_session = app.get_active_session();
+    let terminal_pane = TerminalPane::new(active_session, app.focus == Focus::Terminal);
     f.render_widget(terminal_pane, terminal_area);
 
     // Draw help bar
@@ -198,16 +267,18 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
                 Span::raw("open "),
                 Span::styled(" Space ", Style::default().fg(Color::Cyan)),
                 Span::raw("toggle "),
-                Span::styled(" Tab ", Style::default().fg(Color::Cyan)),
-                Span::raw("focus "),
+                Span::styled(" Ctrl+→ ", Style::default().fg(Color::Cyan)),
+                Span::raw("terminal "),
                 Span::styled(" q ", Style::default().fg(Color::Cyan)),
                 Span::raw("quit"),
             ]
         }
         Focus::Terminal => {
             vec![
-                Span::styled(" Tab ", Style::default().fg(Color::Cyan)),
+                Span::styled(" Ctrl+← ", Style::default().fg(Color::Cyan)),
                 Span::raw("sidebar "),
+                Span::styled(" PgUp/Dn ", Style::default().fg(Color::Cyan)),
+                Span::raw("scroll "),
                 Span::styled(" Ctrl+C ", Style::default().fg(Color::Cyan)),
                 Span::raw("quit"),
             ]

@@ -20,16 +20,27 @@ pub enum ConversationStatus {
 #[derive(Debug, Clone)]
 pub struct Conversation {
     /// Session ID
-    #[allow(dead_code)]
     pub session_id: String,
     /// Display text (first user message, truncated)
     pub display: String,
-    /// Timestamp in milliseconds
+    /// AI-generated summary (if available)
+    #[allow(dead_code)]
+    pub summary: Option<String>,
+    /// Timestamp in milliseconds (file_mtime for sorting)
     pub timestamp: i64,
+    /// ISO 8601 modified timestamp
+    #[allow(dead_code)]
+    pub modified: String,
     /// Project path
     pub project_path: PathBuf,
     /// Current status
     pub status: ConversationStatus,
+    /// Number of messages in the conversation
+    #[allow(dead_code)]
+    pub message_count: u32,
+    /// Git branch (if in a git repo)
+    #[allow(dead_code)]
+    pub git_branch: Option<String>,
 }
 
 /// Message from a conversation JSONL file
@@ -50,6 +61,9 @@ struct MessageContent {
 }
 
 /// Parse a conversation JSONL file to extract display text and status
+/// Note: This is kept for reference but no longer used.
+/// We now get display text from sessions-index.json (see sessions.rs).
+#[allow(dead_code)]
 pub fn parse_conversation(path: &Path) -> Result<(String, ConversationStatus)> {
     if !path.exists() {
         return Ok(("(No messages)".to_string(), ConversationStatus::Idle));
@@ -148,10 +162,13 @@ fn detect_status(last_role: &Option<String>, stop_reason: &Option<String>) -> Co
             if stop_reason.as_deref() == Some("end_turn") {
                 ConversationStatus::WaitingForInput
             } else {
-                ConversationStatus::Active
+                // stop_reason is null - could be streaming or interrupted
+                // Default to Idle since we can't detect if Claude is actually running
+                ConversationStatus::Idle
             }
         }
-        Some("user") => ConversationStatus::Active,
+        // User sent a message but no assistant response yet - waiting for Claude
+        Some("user") => ConversationStatus::WaitingForInput,
         _ => ConversationStatus::Idle,
     }
 }

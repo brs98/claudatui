@@ -5,6 +5,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 /// Entry from ~/.claude/history.jsonl
+/// Note: This is kept for reference but no longer used.
+/// We now use sessions-index.json instead (see sessions.rs).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct HistoryEntry {
     /// Session ID (UUID)
@@ -19,6 +22,9 @@ pub struct HistoryEntry {
 }
 
 /// Parse the Claude history file
+/// Note: This is kept for reference but no longer used.
+/// We now use sessions-index.json instead (see sessions.rs).
+#[allow(dead_code)]
 pub fn parse_history(claude_dir: &Path) -> Result<Vec<HistoryEntry>> {
     let history_path = claude_dir.join("history.jsonl");
 
@@ -54,6 +60,7 @@ pub fn parse_history(claude_dir: &Path) -> Result<Vec<HistoryEntry>> {
 }
 
 /// Get the conversation JSONL file path for a history entry
+#[allow(dead_code)]
 pub fn get_conversation_path(claude_dir: &Path, entry: &HistoryEntry) -> PathBuf {
     // The path is escaped by replacing / with -
     // e.g., /Users/brandon/personal/myproject -> -Users-brandon-personal-myproject

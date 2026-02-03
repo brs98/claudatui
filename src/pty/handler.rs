@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtyPair};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
 /// Handles PTY spawning and I/O for Claude Code
@@ -11,11 +13,21 @@ pub struct PtyHandler {
     writer: Box<dyn Write + Send>,
     output_rx: Receiver<Vec<u8>>,
     _reader_thread: thread::JoinHandle<()>,
+    /// Flag set to false when the reader thread exits (child process terminated)
+    alive: Arc<AtomicBool>,
 }
 
 impl PtyHandler {
     /// Spawn a new PTY running Claude Code in the specified directory
-    pub fn spawn(working_dir: &Path, rows: u16, cols: u16) -> Result<Self> {
+    ///
+    /// If `session_id` is provided, runs `claude --resume <session_id>` to resume
+    /// an existing conversation. Otherwise starts a new conversation.
+    pub fn spawn(
+        working_dir: &Path,
+        rows: u16,
+        cols: u16,
+        session_id: Option<&str>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
 
         let pair = pty_system
@@ -29,6 +41,12 @@ impl PtyHandler {
 
         let mut cmd = CommandBuilder::new("claude");
         cmd.cwd(working_dir);
+
+        // Add --resume flag if session_id provided
+        if let Some(sid) = session_id {
+            cmd.arg("--resume");
+            cmd.arg(sid);
+        }
 
         // Set environment variables for better terminal experience
         cmd.env("TERM", "xterm-256color");
@@ -44,6 +62,8 @@ impl PtyHandler {
 
         // Spawn a thread to read PTY output
         let (output_tx, output_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_clone = Arc::clone(&alive);
 
         let reader_thread = thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -58,6 +78,8 @@ impl PtyHandler {
                     Err(_) => break,
                 }
             }
+            // Mark as not alive when reader thread exits
+            alive_clone.store(false, Ordering::SeqCst);
         });
 
         Ok(Self {
@@ -65,6 +87,7 @@ impl PtyHandler {
             writer,
             output_rx,
             _reader_thread: reader_thread,
+            alive,
         })
     }
 
@@ -92,5 +115,13 @@ impl PtyHandler {
     /// Try to receive output from the PTY (non-blocking)
     pub fn try_recv_output(&self) -> Option<Vec<u8>> {
         self.output_rx.try_recv().ok()
+    }
+
+    /// Check if the PTY child process is still running
+    ///
+    /// Returns false if the reader thread has exited (EOF on PTY),
+    /// which indicates the child process has terminated.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
     }
 }
