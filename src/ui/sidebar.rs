@@ -327,7 +327,7 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 }
 
 /// Check if a group has any active content (for hide_inactive filtering)
-fn group_has_active_content(
+pub fn group_has_active_content(
     group: &ConversationGroup,
     running_sessions: &std::collections::HashSet<String>,
     ephemeral_sessions: &HashMap<String, EphemeralSession>,

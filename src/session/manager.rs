@@ -57,6 +57,7 @@ impl ManagedSession {
         rows: u16,
         cols: u16,
         claude_session_id: Option<&str>,
+        dangerous_mode: bool,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
 
@@ -71,6 +72,11 @@ impl ManagedSession {
 
         let mut cmd = CommandBuilder::new("claude");
         cmd.cwd(working_dir);
+
+        // Add --dangerously-skip-permissions flag if dangerous mode is enabled
+        if dangerous_mode {
+            cmd.arg("--dangerously-skip-permissions");
+        }
 
         // Add --resume flag if session_id provided
         if let Some(sid) = claude_session_id {
@@ -249,6 +255,7 @@ impl SessionManager {
         claude_session_id: Option<&str>,
         rows: u16,
         cols: u16,
+        dangerous_mode: bool,
     ) -> Result<SessionId> {
         // Generate a unique session ID
         let session_id = format!("session-{}", self.next_id);
@@ -260,6 +267,7 @@ impl SessionManager {
             rows,
             cols,
             claude_session_id,
+            dangerous_mode,
         )?;
 
         self.sessions.insert(session_id.clone(), session);
