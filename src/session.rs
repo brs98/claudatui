@@ -2,6 +2,10 @@
 //!
 //! Each `RunningSession` encapsulates all state needed to maintain
 //! an active Claude Code PTY session, including terminal emulation.
+//!
+//! Note: This module is primarily used by the daemon. The TUI uses DaemonClient instead.
+
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 

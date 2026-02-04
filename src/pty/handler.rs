@@ -1,3 +1,9 @@
+//! PTY handling for spawning and managing Claude Code processes.
+//!
+//! Note: This module is primarily used by the daemon. The TUI uses DaemonClient instead.
+
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtyPair};
 use std::io::{Read, Write};

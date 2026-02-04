@@ -18,3 +18,14 @@ dirs = "5"
 chrono = "0.4"
 anyhow = "1"
 vt100 = "0.15"
+interprocess = { version = "2", features = ["tokio"] }
+nix = { version = "0.29", features = ["process", "user"] }
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "claudatui"
+path = "src/main.rs"
+
+[[bin]]
+name = "claudatui-daemon"
+path = "src/bin/claudatui-daemon.rs"

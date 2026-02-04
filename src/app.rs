@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::Result;
 
 use crate::claude::conversation::{detect_status_fast, Conversation, ConversationStatus};
 use crate::claude::grouping::{group_conversations, ConversationGroup};
 use crate::claude::sessions::{parse_all_sessions, SessionEntry};
-use crate::pty::PtyHandler;
-use crate::session::RunningSession;
+use crate::claude::SessionsWatcher;
+use crate::daemon::protocol::SessionState;
+use crate::daemon_client::DaemonClient;
 use crate::ui::sidebar::{build_sidebar_items, SidebarItem, SidebarState};
 
 /// Which pane is currently focused
@@ -28,10 +30,15 @@ pub struct App {
     pub sidebar_state: SidebarState,
     /// Current focus
     pub focus: Focus,
-    /// All running sessions indexed by session_id
-    pub running_sessions: HashMap<String, RunningSession>,
-    /// Currently active session (receives input, is displayed)
+    /// Daemon client for session management
+    pub daemon: Option<DaemonClient>,
+    /// Currently active session ID (daemon's session ID)
     pub active_session_id: Option<String>,
+    /// Cached session state for active session
+    pub session_state_cache: Option<SessionState>,
+    /// Mapping from daemon session ID to Claude session ID (for resuming)
+    /// When a session is created with --resume, we store the Claude session ID here
+    pub session_to_claude_id: HashMap<String, Option<String>>,
     /// Currently selected conversation
     pub selected_conversation: Option<Conversation>,
     /// Should quit
@@ -39,10 +46,17 @@ pub struct App {
     /// Terminal size
     pub term_size: (u16, u16),
     /// Counter for generating temp session IDs for new conversations
+    #[allow(dead_code)]
     new_session_counter: usize,
     /// Running sessions that haven't been saved yet (temp IDs)
-    /// Maps temp session_id -> project path
+    /// Maps daemon session_id -> project path
     pub ephemeral_sessions: HashMap<String, PathBuf>,
+    /// Watcher for sessions-index.json changes
+    sessions_watcher: Option<SessionsWatcher>,
+    /// Timestamp of last refresh (for UI feedback)
+    last_refresh: Option<Instant>,
+    /// Whether last refresh was automatic (from watcher) vs manual
+    last_refresh_was_auto: bool,
 }
 
 impl App {
@@ -52,23 +66,45 @@ impl App {
             .expect("Could not find home directory")
             .join(".claude");
 
+        // Create sessions watcher (optional - app works without it)
+        let sessions_watcher = SessionsWatcher::new(claude_dir.clone()).ok();
+
         let mut app = Self {
             claude_dir,
             groups: Vec::new(),
             sidebar_state: SidebarState::new(),
             focus: Focus::Sidebar,
-            running_sessions: HashMap::new(),
+            daemon: None,
             active_session_id: None,
+            session_state_cache: None,
+            session_to_claude_id: HashMap::new(),
             selected_conversation: None,
             should_quit: false,
             term_size: (80, 24),
             new_session_counter: 0,
             ephemeral_sessions: HashMap::new(),
+            sessions_watcher,
+            last_refresh: None,
+            last_refresh_was_auto: false,
         };
 
         app.load_conversations()?;
 
         Ok(app)
+    }
+
+    /// Connect to the daemon (lazily, on first session creation)
+    fn ensure_daemon(&mut self) -> Result<()> {
+        // Check if existing connection is healthy
+        let needs_reconnect = match &self.daemon {
+            Some(daemon) => !daemon.is_connected(),
+            None => true,
+        };
+
+        if needs_reconnect {
+            self.daemon = Some(DaemonClient::connect()?);
+        }
+        Ok(())
     }
 
     /// Load conversations from sessions-index.json files
@@ -94,7 +130,7 @@ impl App {
 
                 Conversation {
                     session_id: session.session_id,
-                    display: session.first_prompt,
+                    display: session.summary.clone().unwrap_or(session.first_prompt),
                     summary: session.summary,
                     timestamp: session.file_mtime,
                     modified: session.modified,
@@ -113,6 +149,7 @@ impl App {
             &self.groups,
             &self.sidebar_state.collapsed_groups,
             self.sidebar_state.show_all_projects,
+            &self.sidebar_state.expanded_conversations,
             &self.ephemeral_sessions,
         )
     }
@@ -186,6 +223,9 @@ impl App {
                 SidebarItem::ShowMoreProjects { .. } => {
                     self.sidebar_state.toggle_show_all_projects();
                 }
+                SidebarItem::ShowMoreConversations { group_key, .. } => {
+                    self.sidebar_state.toggle_expanded_conversations(group_key);
+                }
             }
         }
     }
@@ -209,7 +249,8 @@ impl App {
                 }
                 SidebarItem::GroupHeader { .. }
                 | SidebarItem::EphemeralSession { .. }
-                | SidebarItem::ShowMoreProjects { .. } => {
+                | SidebarItem::ShowMoreProjects { .. }
+                | SidebarItem::ShowMoreConversations { .. } => {
                     // No conversation selected for headers, ephemeral sessions, or "show more" items
                 }
             }
@@ -249,13 +290,19 @@ impl App {
                     }
                 }
 
-                if let Some((path, session_id, conv)) = target {
-                    // If session is already running, just switch to it
-                    if self.running_sessions.contains_key(&session_id) {
+                if let Some((path, claude_session_id, conv)) = target {
+                    // Check if we already have a daemon session for this Claude session
+                    let existing_session = self
+                        .session_to_claude_id
+                        .iter()
+                        .find(|(_, v)| **v == Some(claude_session_id.clone()))
+                        .map(|(k, _)| k.clone());
+
+                    if let Some(session_id) = existing_session {
                         self.active_session_id = Some(session_id);
                     } else {
-                        // Start new session
-                        self.start_session(&path, Some(&session_id))?;
+                        // Start new session with --resume
+                        self.start_session(&path, Some(&claude_session_id))?;
                     }
                     self.selected_conversation = Some(conv);
                     self.focus = Focus::Terminal;
@@ -287,6 +334,10 @@ impl App {
                 // Toggle showing all projects
                 self.sidebar_state.toggle_show_all_projects();
             }
+            Some(SidebarItem::ShowMoreConversations { group_key, .. }) => {
+                // Toggle showing all conversations for this group
+                self.sidebar_state.toggle_expanded_conversations(group_key);
+            }
             None => {}
         }
 
@@ -295,106 +346,122 @@ impl App {
 
     /// Start a new session (or resume one) in the given directory.
     ///
-    /// If `session_id` is provided, resumes an existing conversation.
-    /// Otherwise starts a new conversation with a temp ID.
-    fn start_session(&mut self, working_dir: &std::path::Path, session_id: Option<&str>) -> Result<()> {
+    /// If `claude_session_id` is provided, resumes an existing conversation.
+    /// Otherwise starts a new conversation.
+    fn start_session(
+        &mut self,
+        working_dir: &std::path::Path,
+        claude_session_id: Option<&str>,
+    ) -> Result<()> {
+        self.ensure_daemon()?;
+
         // Calculate terminal pane size (75% of total width minus borders)
         let cols = (self.term_size.0 * 75 / 100).saturating_sub(2);
         let rows = self.term_size.1.saturating_sub(3); // Account for borders and help bar
 
-        // Spawn new PTY
-        let pty = PtyHandler::spawn(working_dir, rows, cols, session_id)?;
+        let daemon = self.daemon.as_ref().unwrap();
+        let session_id = daemon.create_session(
+            &working_dir.to_string_lossy(),
+            claude_session_id,
+            rows,
+            cols,
+        )?;
 
-        // Determine session ID - use provided one or generate temp ID for new sessions
-        let is_ephemeral = session_id.is_none();
-        let sid = session_id
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                self.new_session_counter += 1;
-                format!("__new_session_{}", self.new_session_counter)
-            });
-
-        // Create running session with its own vt_parser
-        let session = RunningSession::new(sid.clone(), working_dir.to_path_buf(), pty, rows, cols);
-
-        // Add to running sessions and set as active
-        self.running_sessions.insert(sid.clone(), session);
-        self.active_session_id = Some(sid.clone());
+        // Track the mapping from daemon session to Claude session
+        self.session_to_claude_id
+            .insert(session_id.clone(), claude_session_id.map(|s| s.to_string()));
 
         // Track ephemeral sessions (new sessions without a saved conversation file)
-        if is_ephemeral {
-            self.ephemeral_sessions.insert(sid.clone(), working_dir.to_path_buf());
+        if claude_session_id.is_none() {
+            self.ephemeral_sessions
+                .insert(session_id.clone(), working_dir.to_path_buf());
         }
+
+        self.active_session_id = Some(session_id);
 
         // Set conversation status to Active
         if let Some(ref mut conv) = self.selected_conversation {
             conv.status = ConversationStatus::Active;
-            let session_id = conv.session_id.clone();
-            self.update_conversation_status_in_groups(&session_id, ConversationStatus::Active);
+            let sid = conv.session_id.clone();
+            self.update_conversation_status_in_groups(&sid, ConversationStatus::Active);
         }
 
         Ok(())
     }
 
-    /// Get reference to the active session
-    pub fn get_active_session(&self) -> Option<&RunningSession> {
-        self.active_session_id
-            .as_ref()
-            .and_then(|id| self.running_sessions.get(id))
-    }
-
-    /// Get mutable reference to the active session
-    pub fn get_active_session_mut(&mut self) -> Option<&mut RunningSession> {
-        match &self.active_session_id {
-            Some(id) => self.running_sessions.get_mut(id),
-            None => None,
-        }
+    /// Get the cached session state for rendering
+    pub fn get_session_state(&self) -> Option<&SessionState> {
+        self.session_state_cache.as_ref()
     }
 
     /// Get set of running session IDs for sidebar display
     pub fn running_session_ids(&self) -> HashSet<String> {
-        self.running_sessions.keys().cloned().collect()
+        // Return Claude session IDs for sessions that are running
+        self.session_to_claude_id
+            .iter()
+            .filter_map(|(_, claude_id)| claude_id.clone())
+            .collect()
     }
 
-    /// Process output from ALL running sessions
-    pub fn process_all_sessions(&mut self) {
-        for session in self.running_sessions.values_mut() {
-            session.process_output();
+    /// Update session state from daemon (call this in the main loop)
+    pub fn update_session_state(&mut self) {
+        if let Some(ref session_id) = self.active_session_id {
+            if let Some(ref daemon) = self.daemon {
+                match daemon.get_session_state(session_id) {
+                    Ok(state) => {
+                        self.session_state_cache = Some(state);
+                    }
+                    Err(_) => {
+                        // Session may have died
+                        self.session_state_cache = None;
+                    }
+                }
+            }
+        } else {
+            self.session_state_cache = None;
         }
     }
 
     /// Scroll up by the specified number of lines (active session only)
     pub fn scroll_up(&mut self, lines: usize) {
-        if let Some(session) = self.get_active_session_mut() {
-            session.scroll_up(lines);
+        // For now, scrolling is handled locally with cached state
+        // The daemon maintains the actual scroll state
+        if let Some(ref mut state) = self.session_state_cache {
+            state.scroll_offset = state.scroll_offset.saturating_add(lines);
+            state.scroll_locked = state.scroll_offset > 0;
         }
     }
 
     /// Scroll down by the specified number of lines (active session only)
     pub fn scroll_down(&mut self, lines: usize) {
-        if let Some(session) = self.get_active_session_mut() {
-            session.scroll_down(lines);
+        if let Some(ref mut state) = self.session_state_cache {
+            state.scroll_offset = state.scroll_offset.saturating_sub(lines);
+            state.scroll_locked = state.scroll_offset > 0;
         }
     }
 
     /// Jump to the bottom (live view) for active session
     pub fn scroll_to_bottom(&mut self) {
-        if let Some(session) = self.get_active_session_mut() {
-            session.scroll_to_bottom();
+        if let Some(ref mut state) = self.session_state_cache {
+            state.scroll_offset = 0;
+            state.scroll_locked = false;
         }
     }
 
     /// Check if active session is scroll locked
     pub fn is_scroll_locked(&self) -> bool {
-        self.get_active_session()
+        self.session_state_cache
+            .as_ref()
             .map(|s| s.scroll_locked)
             .unwrap_or(false)
     }
 
     /// Write input to active session's PTY
     pub fn write_to_pty(&mut self, data: &[u8]) -> Result<()> {
-        if let Some(session) = self.get_active_session_mut() {
-            session.pty.write(data)?;
+        if let Some(ref session_id) = self.active_session_id {
+            if let Some(ref daemon) = self.daemon {
+                daemon.write_to_session(session_id, data)?;
+            }
         }
         Ok(())
     }
@@ -406,8 +473,11 @@ impl App {
         let cols = (width * 75 / 100).saturating_sub(2);
         let rows = height.saturating_sub(3);
 
-        for session in self.running_sessions.values_mut() {
-            session.resize(rows, cols)?;
+        // Resize all sessions in daemon
+        if let Some(ref daemon) = self.daemon {
+            for session_id in self.session_to_claude_id.keys() {
+                let _ = daemon.resize_session(session_id, rows, cols);
+            }
         }
 
         Ok(())
@@ -427,27 +497,49 @@ impl App {
 
     /// Check all sessions for dead PTYs and clean up
     pub fn check_all_session_status(&mut self) {
-        // Find dead sessions
+        if self.daemon.is_none() {
+            return;
+        }
+
+        let daemon = self.daemon.as_ref().unwrap();
+
+        // Get list of sessions from daemon
+        let sessions = match daemon.list_sessions() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // Find alive session IDs
+        let alive_ids: HashSet<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
+
+        // Remove sessions that are no longer in daemon
         let dead_sessions: Vec<String> = self
-            .running_sessions
-            .iter()
-            .filter(|(_, session)| !session.is_alive())
-            .map(|(id, _)| id.clone())
+            .session_to_claude_id
+            .keys()
+            .filter(|id| !alive_ids.contains(*id))
+            .cloned()
             .collect();
 
-        // Remove dead sessions and update their status
         for session_id in dead_sessions {
-            self.running_sessions.remove(&session_id);
+            // Get the Claude session ID before removing
+            let claude_id = self.session_to_claude_id.remove(&session_id);
 
             // Remove from ephemeral sessions if present
             self.ephemeral_sessions.remove(&session_id);
 
             // Re-read conversation status from file
-            self.refresh_session_status(&session_id);
+            if let Some(Some(cid)) = claude_id {
+                self.refresh_session_status(&cid);
+            }
 
             // Clear active_session_id if it was the dead one
             if self.active_session_id.as_ref() == Some(&session_id) {
                 self.active_session_id = None;
+                self.session_state_cache = None;
+                // Return focus to sidebar when viewed session closes
+                if self.focus == Focus::Terminal {
+                    self.focus = Focus::Sidebar;
+                }
             }
         }
     }
@@ -473,7 +565,8 @@ impl App {
         if let Some(project_path) = conv_info {
             // Build the conversation file path using escaped project path
             let escaped_path = project_path.to_string_lossy().replace('/', "-");
-            let conv_path = self.claude_dir
+            let conv_path = self
+                .claude_dir
                 .join("projects")
                 .join(&escaped_path)
                 .join(format!("{}.jsonl", session_id));
@@ -493,5 +586,52 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Check for sessions-index.json changes and reload conversations if needed
+    pub fn check_sessions_updates(&mut self) {
+        if let Some(ref watcher) = self.sessions_watcher {
+            // Drain all pending notifications
+            let mut should_reload = false;
+            while watcher.try_recv().is_some() {
+                should_reload = true;
+            }
+
+            if should_reload {
+                if self.load_conversations().is_ok() {
+                    self.last_refresh = Some(Instant::now());
+                    self.last_refresh_was_auto = true;
+                }
+            }
+        }
+    }
+
+    /// Manual refresh triggered by user (e.g., pressing 'r')
+    pub fn manual_refresh(&mut self) -> Result<()> {
+        self.load_conversations()?;
+        self.last_refresh = Some(Instant::now());
+        self.last_refresh_was_auto = false;
+        Ok(())
+    }
+
+    /// Check if a refresh happened recently (within the given duration)
+    /// Returns Some((is_auto, elapsed)) if refresh was recent, None otherwise
+    pub fn recent_refresh(&self, within_ms: u64) -> Option<(bool, u64)> {
+        self.last_refresh.and_then(|t| {
+            let elapsed = t.elapsed().as_millis() as u64;
+            if elapsed < within_ms {
+                Some((self.last_refresh_was_auto, elapsed))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get the page size for scrolling based on terminal dimensions
+    pub fn get_page_size(&self) -> usize {
+        self.session_state_cache
+            .as_ref()
+            .map(|s| s.rows.saturating_sub(2) as usize)
+            .unwrap_or(20)
     }
 }

@@ -1,12 +1,16 @@
 mod app;
 mod claude;
+mod daemon;
+mod daemon_client;
 mod event;
 mod pty;
 mod session;
 mod ui;
 
+use std::ffi::CString;
 use std::io;
 use std::io::IsTerminal;
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -31,6 +35,13 @@ use app::{App, Focus};
 use ui::layout::create_layout_with_help;
 use ui::sidebar::Sidebar;
 use ui::terminal_pane::TerminalPane;
+
+/// Hot reload status for display
+enum HotReloadStatus {
+    None,
+    Building,
+    BuildFailed(String),
+}
 
 fn main() -> Result<()> {
     // Check if we're in a proper terminal
@@ -65,19 +76,48 @@ fn main() -> Result<()> {
     );
     let _ = terminal.show_cursor();
 
-    result
+    // If we got a hot reload request, exec the new binary
+    match result {
+        Ok(HotReloadAction::Exec(path)) => {
+            // Re-exec the new binary
+            let c_path = CString::new(path.as_bytes()).expect("Invalid path");
+            let args: [CString; 1] = [c_path.clone()];
+            // execv never returns on success
+            #[allow(unreachable_code)]
+            match nix::unistd::execv(&c_path, &args) {
+                Ok(infallible) => match infallible {},
+                Err(e) => anyhow::bail!("Failed to exec new binary: {}", e),
+            }
+        }
+        Ok(HotReloadAction::Quit) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+/// Action to take after run_app completes
+enum HotReloadAction {
+    Quit,
+    Exec(String),
+}
+
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<HotReloadAction> {
+    let mut hot_reload_status = HotReloadStatus::None;
+
     loop {
-        // Process output from ALL running sessions (not just active)
-        app.process_all_sessions();
+        // Update session state from daemon
+        app.update_session_state();
 
         // Check all sessions for dead PTYs and clean up
         app.check_all_session_status();
 
+        // Check for sessions-index.json changes and reload if needed
+        app.check_sessions_updates();
+
         // Draw UI
-        terminal.draw(|f| draw_ui(f, app))?;
+        terminal.draw(|f| draw_ui(f, app, &hot_reload_status))?;
 
         // Handle events with timeout for PTY updates
         if poll(Duration::from_millis(50))? {
@@ -85,8 +125,25 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
             match event {
                 Event::Key(key) => {
-                    if handle_key_event(app, key)? {
-                        break;
+                    match handle_key_event(app, key, &mut hot_reload_status)? {
+                        KeyAction::Continue => {}
+                        KeyAction::Quit => return Ok(HotReloadAction::Quit),
+                        KeyAction::HotReload => {
+                            // Trigger hot reload
+                            hot_reload_status = HotReloadStatus::Building;
+
+                            // Draw the "Building..." status immediately
+                            terminal.draw(|f| draw_ui(f, app, &hot_reload_status))?;
+
+                            // Run cargo build
+                            match perform_hot_reload() {
+                                Ok(binary_path) => return Ok(HotReloadAction::Exec(binary_path)),
+                                Err(e) => {
+                                    hot_reload_status =
+                                        HotReloadStatus::BuildFailed(e.to_string());
+                                }
+                            }
+                        }
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -100,27 +157,45 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         }
 
         if app.should_quit {
-            break;
+            return Ok(HotReloadAction::Quit);
         }
     }
-
-    Ok(())
 }
 
-fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
+/// Action returned from key handling
+enum KeyAction {
+    Continue,
+    Quit,
+    HotReload,
+}
+
+fn handle_key_event(
+    app: &mut App,
+    key: KeyEvent,
+    hot_reload_status: &mut HotReloadStatus,
+) -> Result<KeyAction> {
+    // Clear build failed status on any key
+    if matches!(hot_reload_status, HotReloadStatus::BuildFailed(_)) {
+        *hot_reload_status = HotReloadStatus::None;
+    }
+
     // Global keybindings
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(true),
+        (KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(KeyAction::Quit),
         (KeyCode::Char('q'), KeyModifiers::NONE) if app.focus == Focus::Sidebar => {
-            return Ok(true);
+            return Ok(KeyAction::Quit);
         }
-        (KeyCode::Left, KeyModifiers::CONTROL) => {
+        // Hot reload: Ctrl+Shift+B (B for Build)
+        (KeyCode::Char('B'), KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+            return Ok(KeyAction::HotReload);
+        }
+        (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
             app.set_focus(Focus::Sidebar);
-            return Ok(false);
+            return Ok(KeyAction::Continue);
         }
-        (KeyCode::Right, KeyModifiers::CONTROL) => {
+        (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
             app.set_focus(Focus::Terminal);
-            return Ok(false);
+            return Ok(KeyAction::Continue);
         }
         _ => {}
     }
@@ -132,49 +207,43 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
     }
 }
 
-fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => app.navigate_down(),
         KeyCode::Char('k') | KeyCode::Up => app.navigate_up(),
         KeyCode::Char('g') => app.jump_to_first(),
         KeyCode::Char('G') => app.jump_to_last(),
         KeyCode::Char(' ') => app.toggle_current_group(),
+        KeyCode::Char('r') => app.manual_refresh()?,
         KeyCode::Enter => {
             app.open_selected()?;
         }
         _ => {}
     }
-    Ok(false)
+    Ok(KeyAction::Continue)
 }
 
-fn handle_terminal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
-    // Get page size from active session, or use default
-    let page_size = app
-        .get_active_session()
-        .map(|s| {
-            let (rows, _) = s.vt_parser.screen().size();
-            rows.saturating_sub(2) as usize
-        })
-        .unwrap_or(20);
-
+fn handle_terminal_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    // Get page size from session state, or use default
+    let page_size = app.get_page_size();
     let is_scroll_locked = app.is_scroll_locked();
 
     match (key.code, key.modifiers) {
         (KeyCode::PageUp, _) => {
             app.scroll_up(page_size);
-            return Ok(false);
+            return Ok(KeyAction::Continue);
         }
         (KeyCode::PageDown, _) => {
             app.scroll_down(page_size);
-            return Ok(false);
+            return Ok(KeyAction::Continue);
         }
         (KeyCode::Char('G'), KeyModifiers::SHIFT) if is_scroll_locked => {
             app.scroll_to_bottom();
-            return Ok(false);
+            return Ok(KeyAction::Continue);
         }
         (KeyCode::Esc, _) if is_scroll_locked => {
             app.scroll_to_bottom();
-            return Ok(false);
+            return Ok(KeyAction::Continue);
         }
         _ => {}
     }
@@ -184,7 +253,7 @@ fn handle_terminal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     if !bytes.is_empty() {
         app.write_to_pty(&bytes)?;
     }
-    Ok(false)
+    Ok(KeyAction::Continue)
 }
 
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
@@ -212,7 +281,9 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
         (KeyCode::Char(c), KeyModifiers::SHIFT) => vec![c.to_ascii_uppercase() as u8],
         (KeyCode::Char(c), KeyModifiers::CONTROL) => {
             // Control characters: Ctrl+A = 0x01, Ctrl+B = 0x02, etc.
-            let ctrl = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
+            let ctrl = (c.to_ascii_lowercase() as u8)
+                .wrapping_sub(b'a')
+                .wrapping_add(1);
             vec![ctrl]
         }
         (KeyCode::Enter, _) => vec![b'\r'],
@@ -233,7 +304,48 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
     }
 }
 
-fn draw_ui(f: &mut Frame, app: &mut App) {
+/// Perform a hot reload by building the project and returning the new binary path.
+fn perform_hot_reload() -> Result<String> {
+    // Get the current executable's directory to determine the project root
+    let current_exe = std::env::current_exe()?;
+    let exe_dir = current_exe
+        .parent()
+        .context("No parent directory for executable")?;
+
+    // The project root should be a few levels up from target/release or target/debug
+    let project_root = if exe_dir.ends_with("target/release") || exe_dir.ends_with("target/debug") {
+        exe_dir.parent().and_then(|p| p.parent())
+    } else {
+        // Might be running from project root directly
+        None
+    };
+
+    // Build the project
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build").arg("--release");
+
+    if let Some(root) = project_root {
+        cmd.current_dir(root);
+    }
+
+    let output = cmd.output().context("Failed to run cargo build")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Build failed:\n{}", stderr);
+    }
+
+    // Return the path to the new binary
+    let new_binary = if let Some(root) = project_root {
+        root.join("target/release/claudatui")
+    } else {
+        exe_dir.join("claudatui")
+    };
+
+    Ok(new_binary.to_string_lossy().to_string())
+}
+
+fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
     let (sidebar_area, terminal_area, help_area) = create_layout_with_help(f.area());
 
     // Collect running session IDs for sidebar display
@@ -248,44 +360,77 @@ fn draw_ui(f: &mut Frame, app: &mut App) {
     );
     f.render_stateful_widget(sidebar, sidebar_area, &mut app.sidebar_state);
 
-    // Draw terminal pane with active session
-    let active_session = app.get_active_session();
-    let terminal_pane = TerminalPane::new(active_session, app.focus == Focus::Terminal);
+    // Draw terminal pane with session state from daemon
+    let session_state = app.get_session_state();
+    let terminal_pane = TerminalPane::new(session_state, app.focus == Focus::Terminal);
     f.render_widget(terminal_pane, terminal_area);
 
-    // Draw help bar
-    draw_help_bar(f, help_area, app);
+    // Draw help bar or hot reload status
+    match hot_reload_status {
+        HotReloadStatus::None => draw_help_bar(f, help_area, app),
+        HotReloadStatus::Building => {
+            let msg = Paragraph::new(Line::from(vec![
+                Span::styled(" BUILDING ", Style::default().fg(Color::Black).bg(Color::Yellow)),
+                Span::raw(" Running cargo build --release..."),
+            ]))
+            .style(Style::default().bg(Color::DarkGray));
+            f.render_widget(msg, help_area);
+        }
+        HotReloadStatus::BuildFailed(err) => {
+            let msg = Paragraph::new(Line::from(vec![
+                Span::styled(" BUILD FAILED ", Style::default().fg(Color::White).bg(Color::Red)),
+                Span::raw(format!(" {} (press any key to dismiss)", err)),
+            ]))
+            .style(Style::default().bg(Color::DarkGray));
+            f.render_widget(msg, help_area);
+        }
+    }
 }
 
 fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
+    // Check for recent refresh to show feedback (visible for 2 seconds)
+    if let Some((is_auto, _elapsed)) = app.recent_refresh(2000) {
+        let label = if is_auto { " AUTO-REFRESHED " } else { " REFRESHED " };
+        let msg = Paragraph::new(Line::from(vec![
+            Span::styled(label, Style::default().fg(Color::Black).bg(Color::Green)),
+            Span::raw(" Sessions list updated"),
+        ]))
+        .style(Style::default().bg(Color::DarkGray));
+        f.render_widget(msg, area);
+        return;
+    }
+
     let help_text = match app.focus {
         Focus::Sidebar => {
             vec![
                 Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
-                Span::raw("navigate "),
+                Span::raw("nav "),
                 Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
                 Span::raw("open "),
                 Span::styled(" Space ", Style::default().fg(Color::Cyan)),
                 Span::raw("toggle "),
-                Span::styled(" Ctrl+→ ", Style::default().fg(Color::Cyan)),
+                Span::styled(" C-l ", Style::default().fg(Color::Cyan)),
                 Span::raw("terminal "),
-                Span::styled(" q ", Style::default().fg(Color::Cyan)),
+                Span::styled(" r ", Style::default().fg(Color::Cyan)),
+                Span::raw("refresh "),
+                Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
                 Span::raw("quit"),
             ]
         }
         Focus::Terminal => {
             vec![
-                Span::styled(" Ctrl+← ", Style::default().fg(Color::Cyan)),
+                Span::styled(" C-h ", Style::default().fg(Color::Cyan)),
                 Span::raw("sidebar "),
                 Span::styled(" PgUp/Dn ", Style::default().fg(Color::Cyan)),
                 Span::raw("scroll "),
-                Span::styled(" Ctrl+C ", Style::default().fg(Color::Cyan)),
+                Span::styled(" C-S-B ", Style::default().fg(Color::Cyan)),
+                Span::raw("build "),
+                Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
                 Span::raw("quit"),
             ]
         }
     };
 
-    let help = Paragraph::new(Line::from(help_text))
-        .style(Style::default().bg(Color::DarkGray));
+    let help = Paragraph::new(Line::from(help_text)).style(Style::default().bg(Color::DarkGray));
     f.render_widget(help, area);
 }

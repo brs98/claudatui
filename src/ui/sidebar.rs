@@ -15,12 +15,17 @@ use crate::claude::grouping::ConversationGroup;
 /// Default number of projects shown before "Show more" appears
 const DEFAULT_VISIBLE_PROJECTS: usize = 5;
 
+/// Default number of conversations shown per project before "Show more" appears
+const DEFAULT_VISIBLE_CONVERSATIONS: usize = 3;
+
 /// Sidebar widget state
 #[derive(Default)]
 pub struct SidebarState {
     pub list_state: ListState,
     pub collapsed_groups: std::collections::HashSet<String>,
     pub show_all_projects: bool,
+    /// Group keys that have all conversations expanded (not limited to DEFAULT_VISIBLE_CONVERSATIONS)
+    pub expanded_conversations: std::collections::HashSet<String>,
 }
 
 impl SidebarState {
@@ -40,6 +45,14 @@ impl SidebarState {
 
     pub fn toggle_show_all_projects(&mut self) {
         self.show_all_projects = !self.show_all_projects;
+    }
+
+    pub fn toggle_expanded_conversations(&mut self, group_key: &str) {
+        if self.expanded_conversations.contains(group_key) {
+            self.expanded_conversations.remove(group_key);
+        } else {
+            self.expanded_conversations.insert(group_key.to_string());
+        }
     }
 }
 
@@ -91,6 +104,7 @@ impl<'a> StatefulWidget for Sidebar<'a> {
             self.groups,
             &state.collapsed_groups,
             state.show_all_projects,
+            &state.expanded_conversations,
             self.running_sessions,
             self.ephemeral_sessions,
         );
@@ -110,6 +124,7 @@ fn build_list_items(
     groups: &[ConversationGroup],
     collapsed: &std::collections::HashSet<String>,
     show_all_projects: bool,
+    expanded_conversations: &std::collections::HashSet<String>,
     running_sessions: &std::collections::HashSet<String>,
     ephemeral_sessions: &HashMap<String, PathBuf>,
 ) -> Vec<ListItem<'static>> {
@@ -153,8 +168,17 @@ fn build_list_items(
                 }
             }
 
-            // Then show saved conversations
-            for conv in group.conversations() {
+            // Determine how many conversations to show
+            let conversations = group.conversations();
+            let is_expanded = expanded_conversations.contains(&group_key);
+            let visible_convos = if is_expanded || conversations.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
+                conversations
+            } else {
+                &conversations[..DEFAULT_VISIBLE_CONVERSATIONS]
+            };
+
+            // Then show saved conversations (limited or all)
+            for conv in visible_convos {
                 // If session is running in background, show it as Active
                 // regardless of the file-based status
                 let is_running = running_sessions.contains(&conv.session_id);
@@ -179,6 +203,18 @@ fn build_list_items(
                     Span::raw("  "),
                     status_indicator,
                     Span::raw(display),
+                ])));
+            }
+
+            // Add "show more conversations" if truncated
+            if !is_expanded && conversations.len() > DEFAULT_VISIBLE_CONVERSATIONS {
+                let hidden = conversations.len() - DEFAULT_VISIBLE_CONVERSATIONS;
+                items.push(ListItem::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("↓ Show {} more...", hidden),
+                        Style::default().fg(Color::Blue),
+                    ),
                 ])));
             }
         }
@@ -212,6 +248,7 @@ pub enum SidebarItem {
     /// A running session that hasn't been saved yet (temp session)
     EphemeralSession { session_id: String, group_key: String },
     ShowMoreProjects { #[allow(dead_code)] hidden_count: usize },
+    ShowMoreConversations { group_key: String, #[allow(dead_code)] hidden_count: usize },
 }
 
 /// Build a flat list of sidebar items for navigation
@@ -219,6 +256,7 @@ pub fn build_sidebar_items(
     groups: &[ConversationGroup],
     collapsed: &std::collections::HashSet<String>,
     show_all_projects: bool,
+    expanded_conversations: &std::collections::HashSet<String>,
     ephemeral_sessions: &HashMap<String, PathBuf>,
 ) -> Vec<SidebarItem> {
     let mut items = Vec::new();
@@ -250,11 +288,28 @@ pub fn build_sidebar_items(
                 }
             }
 
-            // Then add saved conversations
-            for (index, _conv) in group.conversations().iter().enumerate() {
+            // Determine how many conversations to show
+            let conversations = group.conversations();
+            let is_expanded = expanded_conversations.contains(&group_key);
+            let visible_count = if is_expanded || conversations.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
+                conversations.len()
+            } else {
+                DEFAULT_VISIBLE_CONVERSATIONS
+            };
+
+            // Then add saved conversations (limited or all)
+            for index in 0..visible_count {
                 items.push(SidebarItem::Conversation {
                     group_key: group_key.clone(),
                     index,
+                });
+            }
+
+            // Add "show more conversations" if truncated
+            if !is_expanded && conversations.len() > DEFAULT_VISIBLE_CONVERSATIONS {
+                items.push(SidebarItem::ShowMoreConversations {
+                    group_key: group_key.clone(),
+                    hidden_count: conversations.len() - DEFAULT_VISIBLE_CONVERSATIONS,
                 });
             }
         }

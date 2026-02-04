@@ -5,17 +5,20 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
-use crate::session::RunningSession;
+use crate::daemon::protocol::{CellAttrs, ScreenState, SessionState, TermColor};
 
-/// Terminal pane widget for displaying PTY output
+/// Terminal pane widget for displaying PTY output from daemon.
 pub struct TerminalPane<'a> {
-    session: Option<&'a RunningSession>,
+    session_state: Option<&'a SessionState>,
     focused: bool,
 }
 
 impl<'a> TerminalPane<'a> {
-    pub fn new(session: Option<&'a RunningSession>, focused: bool) -> Self {
-        Self { session, focused }
+    pub fn new(session_state: Option<&'a SessionState>, focused: bool) -> Self {
+        Self {
+            session_state,
+            focused,
+        }
     }
 }
 
@@ -28,7 +31,10 @@ impl<'a> Widget for TerminalPane<'a> {
         };
 
         // Get scroll offset from session if available
-        let scroll_offset = self.session.map(|s| s.scroll_offset).unwrap_or(0);
+        let scroll_offset = self
+            .session_state
+            .map(|s| s.scroll_offset)
+            .unwrap_or(0);
 
         // Show scroll indicator in title when scrolled
         let title = if scroll_offset > 0 {
@@ -45,9 +51,9 @@ impl<'a> Widget for TerminalPane<'a> {
         let inner_area = block.inner(area);
         block.render(area, buf);
 
-        match self.session {
-            Some(session) => {
-                render_vt100_screen(session.vt_parser.screen(), inner_area, buf, session.scroll_offset);
+        match self.session_state {
+            Some(state) => {
+                render_screen_state(&state.screen, inner_area, buf, state.scroll_offset);
             }
             None => {
                 // Show placeholder when no PTY is active
@@ -62,31 +68,31 @@ impl<'a> Widget for TerminalPane<'a> {
     }
 }
 
-fn render_vt100_screen(screen: &vt100::Screen, area: Rect, buf: &mut Buffer, scroll_offset: usize) {
-    let (rows, cols) = screen.size();
+fn render_screen_state(screen: &ScreenState, area: Rect, buf: &mut Buffer, scroll_offset: usize) {
+    let _rows = screen.rows.len() as u16;
 
-    // The vt100 library's set_scrollback was already called by the App,
-    // so screen.cell() returns the appropriate visible rows
-    for row in 0..rows.min(area.height) {
-        let y = area.y + row;
+    for (row_idx, screen_row) in screen.rows.iter().enumerate() {
+        if row_idx as u16 >= area.height {
+            break;
+        }
+        let y = area.y + row_idx as u16;
 
-        for col in 0..cols.min(area.width) {
-            let x = area.x + col;
-            let cell = screen.cell(row, col);
+        for (col_idx, cell) in screen_row.cells.iter().enumerate() {
+            if col_idx as u16 >= area.width {
+                break;
+            }
+            let x = area.x + col_idx as u16;
 
-            if let Some(cell) = cell {
-                let contents = cell.contents();
-                if !contents.is_empty() {
-                    let style = convert_vt100_style(&cell);
-                    buf.set_string(x, y, &contents, style);
-                }
+            if !cell.contents.is_empty() {
+                let style = convert_cell_style(&cell.fg, &cell.bg, &cell.attrs);
+                buf.set_string(x, y, &cell.contents, style);
             }
         }
     }
 
     // Only render cursor when at live view (not scrolled)
-    if scroll_offset == 0 {
-        let (cursor_row, cursor_col) = screen.cursor_position();
+    if scroll_offset == 0 && screen.cursor_visible {
+        let (cursor_row, cursor_col) = screen.cursor;
         let cursor_x = area.x + cursor_col;
         let cursor_y = area.y + cursor_row;
 
@@ -98,54 +104,24 @@ fn render_vt100_screen(screen: &vt100::Screen, area: Rect, buf: &mut Buffer, scr
     }
 }
 
-fn convert_vt100_style(cell: &vt100::Cell) -> Style {
+fn convert_cell_style(fg: &TermColor, bg: &TermColor, attrs: &CellAttrs) -> Style {
     let mut style = Style::default();
 
-    // Convert foreground color
-    let fg = cell.fgcolor();
-    style = style.fg(convert_vt100_color(fg));
+    style = style.fg(fg.to_ratatui());
+    style = style.bg(bg.to_ratatui());
 
-    // Convert background color
-    let bg = cell.bgcolor();
-    style = style.bg(convert_vt100_color(bg));
-
-    // Convert attributes
-    if cell.bold() {
+    if attrs.bold {
         style = style.add_modifier(Modifier::BOLD);
     }
-    if cell.italic() {
+    if attrs.italic {
         style = style.add_modifier(Modifier::ITALIC);
     }
-    if cell.underline() {
+    if attrs.underline {
         style = style.add_modifier(Modifier::UNDERLINED);
     }
-    if cell.inverse() {
+    if attrs.inverse {
         style = style.add_modifier(Modifier::REVERSED);
     }
 
     style
-}
-
-fn convert_vt100_color(color: vt100::Color) -> Color {
-    match color {
-        vt100::Color::Default => Color::Reset,
-        vt100::Color::Idx(0) => Color::Black,
-        vt100::Color::Idx(1) => Color::Red,
-        vt100::Color::Idx(2) => Color::Green,
-        vt100::Color::Idx(3) => Color::Yellow,
-        vt100::Color::Idx(4) => Color::Blue,
-        vt100::Color::Idx(5) => Color::Magenta,
-        vt100::Color::Idx(6) => Color::Cyan,
-        vt100::Color::Idx(7) => Color::Gray,
-        vt100::Color::Idx(8) => Color::DarkGray,
-        vt100::Color::Idx(9) => Color::LightRed,
-        vt100::Color::Idx(10) => Color::LightGreen,
-        vt100::Color::Idx(11) => Color::LightYellow,
-        vt100::Color::Idx(12) => Color::LightBlue,
-        vt100::Color::Idx(13) => Color::LightMagenta,
-        vt100::Color::Idx(14) => Color::LightCyan,
-        vt100::Color::Idx(15) => Color::White,
-        vt100::Color::Idx(idx) => Color::Indexed(idx),
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-    }
 }
