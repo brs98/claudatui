@@ -1,10 +1,6 @@
-//! Session manager for the daemon.
+//! Session manager for PTY sessions.
 //!
-//! Owns all PTY sessions and their terminal state.
-//!
-//! Note: This module is used by the daemon binary, not the TUI.
-
-#![allow(dead_code)]
+//! Owns all PTY sessions and their terminal state directly in the TUI process.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -17,21 +13,21 @@ use std::thread;
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 
-use super::protocol::{
-    screen_state_from_vt100, CreateSessionRequest, SessionId, SessionInfo, SessionState,
-};
+use super::types::{screen_state_from_vt100, SessionId, SessionState};
 
 /// Number of scrollback lines to retain in terminal history per session.
 pub const SCROLLBACK_LINES: usize = 10000;
 
-/// A managed PTY session in the daemon.
+/// A managed PTY session.
 pub struct ManagedSession {
-    /// Unique session ID.
+    /// Unique session ID (internal to this process).
     pub session_id: SessionId,
     /// Working directory.
-    pub working_dir: String,
+    #[allow(dead_code)]
+    working_dir: String,
     /// Claude conversation ID if resuming.
-    pub claude_session_id: Option<String>,
+    #[allow(dead_code)]
+    claude_session_id: Option<String>,
     /// PTY pair.
     pair: PtyPair,
     /// Writer to send input to PTY.
@@ -142,7 +138,7 @@ impl ManagedSession {
     /// Returns true if any output was processed.
     pub fn process_output(&mut self) -> bool {
         let mut had_output = false;
-        while let Some(data) = self.output_rx.try_recv().ok() {
+        while let Ok(data) = self.output_rx.try_recv() {
             self.vt_parser.process(&data);
             had_output = true;
         }
@@ -150,8 +146,13 @@ impl ManagedSession {
         // Auto-scroll to bottom when new output arrives, unless scroll is locked
         if had_output && !self.scroll_locked {
             self.scroll_offset = 0;
-            self.vt_parser.set_scrollback(0);
         }
+
+        // ALWAYS re-apply scroll position after processing output.
+        // vt100's process() resets scrollback internally (standard terminal auto-scroll behavior),
+        // so we must ensure the vt100 parser's scrollback matches our tracked position
+        // before any subsequent state reads.
+        self.vt_parser.set_scrollback(self.scroll_offset);
 
         had_output
     }
@@ -179,18 +180,6 @@ impl ManagedSession {
         self.rows = rows;
         self.cols = cols;
         Ok(())
-    }
-
-    /// Get session info for listing.
-    pub fn info(&self) -> SessionInfo {
-        SessionInfo {
-            session_id: self.session_id.clone(),
-            working_dir: self.working_dir.clone(),
-            claude_session_id: self.claude_session_id.clone(),
-            is_alive: self.is_alive(),
-            rows: self.rows,
-            cols: self.cols,
-        }
     }
 
     /// Get full session state for rendering.
@@ -234,10 +223,12 @@ impl ManagedSession {
     }
 }
 
-/// Manages all sessions in the daemon.
+/// Manages all PTY sessions.
 pub struct SessionManager {
     /// All managed sessions.
     sessions: HashMap<SessionId, ManagedSession>,
+    /// Counter for generating session IDs.
+    next_id: u64,
 }
 
 impl SessionManager {
@@ -245,20 +236,30 @@ impl SessionManager {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            next_id: 0,
         }
     }
 
     /// Create a new session.
-    pub fn create_session(&mut self, req: CreateSessionRequest) -> Result<SessionId> {
-        // Generate a unique session ID for the daemon
-        let session_id = uuid::Uuid::new_v4().to_string();
+    ///
+    /// Returns the session ID on success.
+    pub fn create_session(
+        &mut self,
+        working_dir: &Path,
+        claude_session_id: Option<&str>,
+        rows: u16,
+        cols: u16,
+    ) -> Result<SessionId> {
+        // Generate a unique session ID
+        let session_id = format!("session-{}", self.next_id);
+        self.next_id += 1;
 
         let session = ManagedSession::spawn(
             session_id.clone(),
-            Path::new(&req.working_dir),
-            req.rows,
-            req.cols,
-            req.resume_session_id.as_deref(),
+            working_dir,
+            rows,
+            cols,
+            claude_session_id,
         )?;
 
         self.sessions.insert(session_id.clone(), session);
@@ -266,18 +267,10 @@ impl SessionManager {
     }
 
     /// Close a session.
+    ///
+    /// Returns true if the session existed and was closed.
     pub fn close_session(&mut self, session_id: &str) -> bool {
         self.sessions.remove(session_id).is_some()
-    }
-
-    /// List all sessions.
-    pub fn list_sessions(&self) -> Vec<SessionInfo> {
-        self.sessions.values().map(|s| s.info()).collect()
-    }
-
-    /// Get a session by ID.
-    pub fn get_session(&self, session_id: &str) -> Option<&ManagedSession> {
-        self.sessions.get(session_id)
     }
 
     /// Get a mutable session by ID.
@@ -285,8 +278,13 @@ impl SessionManager {
         self.sessions.get_mut(session_id)
     }
 
+    /// Get the session state for rendering.
+    pub fn get_session_state(&self, session_id: &str) -> Option<SessionState> {
+        self.sessions.get(session_id).map(|s| s.state())
+    }
+
     /// Process output for all sessions.
-    pub fn process_all(&mut self) {
+    pub fn process_all_output(&mut self) {
         for session in self.sessions.values_mut() {
             session.process_output();
         }
@@ -294,7 +292,7 @@ impl SessionManager {
 
     /// Clean up dead sessions.
     /// Returns the IDs of sessions that were removed.
-    pub fn cleanup_dead_sessions(&mut self) -> Vec<SessionId> {
+    pub fn cleanup_dead(&mut self) -> Vec<SessionId> {
         let dead: Vec<SessionId> = self
             .sessions
             .iter()
@@ -307,6 +305,11 @@ impl SessionManager {
         }
 
         dead
+    }
+
+    /// Get all session IDs (for iteration).
+    pub fn session_ids(&self) -> Vec<SessionId> {
+        self.sessions.keys().cloned().collect()
     }
 }
 

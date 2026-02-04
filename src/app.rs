@@ -8,8 +8,7 @@ use crate::claude::conversation::{detect_status_fast, Conversation, Conversation
 use crate::claude::grouping::{group_conversations, ConversationGroup};
 use crate::claude::sessions::{parse_all_sessions, SessionEntry};
 use crate::claude::SessionsWatcher;
-use crate::daemon::protocol::SessionState;
-use crate::daemon_client::DaemonClient;
+use crate::session::{SessionManager, SessionState};
 use crate::ui::sidebar::{build_sidebar_items, SidebarItem, SidebarState};
 
 /// Which pane is currently focused
@@ -18,6 +17,15 @@ pub enum Focus {
     #[default]
     Sidebar,
     Terminal,
+}
+
+/// State for tracking multi-key chord sequences (e.g., vim-style "dd" to delete)
+#[derive(Debug, Clone, Default)]
+pub enum ChordState {
+    #[default]
+    None,
+    /// First 'd' pressed, waiting for second 'd' to close session
+    DeletePending { started_at: Instant },
 }
 
 /// Application state
@@ -30,13 +38,13 @@ pub struct App {
     pub sidebar_state: SidebarState,
     /// Current focus
     pub focus: Focus,
-    /// Daemon client for session management
-    pub daemon: Option<DaemonClient>,
-    /// Currently active session ID (daemon's session ID)
+    /// Session manager for PTY sessions (owned directly, no daemon)
+    pub session_manager: SessionManager,
+    /// Currently active session ID
     pub active_session_id: Option<String>,
     /// Cached session state for active session
     pub session_state_cache: Option<SessionState>,
-    /// Mapping from daemon session ID to Claude session ID (for resuming)
+    /// Mapping from session ID to Claude session ID (for resuming)
     /// When a session is created with --resume, we store the Claude session ID here
     pub session_to_claude_id: HashMap<String, Option<String>>,
     /// Currently selected conversation
@@ -57,6 +65,8 @@ pub struct App {
     last_refresh: Option<Instant>,
     /// Whether last refresh was automatic (from watcher) vs manual
     last_refresh_was_auto: bool,
+    /// State for tracking chord key sequences (e.g., "dd" to close)
+    pub chord_state: ChordState,
 }
 
 impl App {
@@ -74,7 +84,7 @@ impl App {
             groups: Vec::new(),
             sidebar_state: SidebarState::new(),
             focus: Focus::Sidebar,
-            daemon: None,
+            session_manager: SessionManager::new(),
             active_session_id: None,
             session_state_cache: None,
             session_to_claude_id: HashMap::new(),
@@ -86,25 +96,12 @@ impl App {
             sessions_watcher,
             last_refresh: None,
             last_refresh_was_auto: false,
+            chord_state: ChordState::None,
         };
 
         app.load_conversations()?;
 
         Ok(app)
-    }
-
-    /// Connect to the daemon (lazily, on first session creation)
-    fn ensure_daemon(&mut self) -> Result<()> {
-        // Check if existing connection is healthy
-        let needs_reconnect = match &self.daemon {
-            Some(daemon) => !daemon.is_connected(),
-            None => true,
-        };
-
-        if needs_reconnect {
-            self.daemon = Some(DaemonClient::connect()?);
-        }
-        Ok(())
     }
 
     /// Load conversations from sessions-index.json files
@@ -151,6 +148,8 @@ impl App {
             self.sidebar_state.show_all_projects,
             &self.sidebar_state.expanded_conversations,
             &self.ephemeral_sessions,
+            &self.running_session_ids(),
+            self.sidebar_state.hide_inactive,
         )
     }
 
@@ -353,21 +352,18 @@ impl App {
         working_dir: &std::path::Path,
         claude_session_id: Option<&str>,
     ) -> Result<()> {
-        self.ensure_daemon()?;
-
         // Calculate terminal pane size (75% of total width minus borders)
         let cols = (self.term_size.0 * 75 / 100).saturating_sub(2);
         let rows = self.term_size.1.saturating_sub(3); // Account for borders and help bar
 
-        let daemon = self.daemon.as_ref().unwrap();
-        let session_id = daemon.create_session(
-            &working_dir.to_string_lossy(),
+        let session_id = self.session_manager.create_session(
+            working_dir,
             claude_session_id,
             rows,
             cols,
         )?;
 
-        // Track the mapping from daemon session to Claude session
+        // Track the mapping from session ID to Claude session
         self.session_to_claude_id
             .insert(session_id.clone(), claude_session_id.map(|s| s.to_string()));
 
@@ -403,20 +399,10 @@ impl App {
             .collect()
     }
 
-    /// Update session state from daemon (call this in the main loop)
+    /// Update session state cache (call this in the main loop after processing output)
     pub fn update_session_state(&mut self) {
         if let Some(ref session_id) = self.active_session_id {
-            if let Some(ref daemon) = self.daemon {
-                match daemon.get_session_state(session_id) {
-                    Ok(state) => {
-                        self.session_state_cache = Some(state);
-                    }
-                    Err(_) => {
-                        // Session may have died
-                        self.session_state_cache = None;
-                    }
-                }
-            }
+            self.session_state_cache = self.session_manager.get_session_state(session_id);
         } else {
             self.session_state_cache = None;
         }
@@ -424,27 +410,28 @@ impl App {
 
     /// Scroll up by the specified number of lines (active session only)
     pub fn scroll_up(&mut self, lines: usize) {
-        // For now, scrolling is handled locally with cached state
-        // The daemon maintains the actual scroll state
-        if let Some(ref mut state) = self.session_state_cache {
-            state.scroll_offset = state.scroll_offset.saturating_add(lines);
-            state.scroll_locked = state.scroll_offset > 0;
+        if let Some(ref session_id) = self.active_session_id.clone() {
+            if let Some(session) = self.session_manager.get_session_mut(&session_id) {
+                session.scroll_up(lines);
+            }
         }
     }
 
     /// Scroll down by the specified number of lines (active session only)
     pub fn scroll_down(&mut self, lines: usize) {
-        if let Some(ref mut state) = self.session_state_cache {
-            state.scroll_offset = state.scroll_offset.saturating_sub(lines);
-            state.scroll_locked = state.scroll_offset > 0;
+        if let Some(ref session_id) = self.active_session_id.clone() {
+            if let Some(session) = self.session_manager.get_session_mut(&session_id) {
+                session.scroll_down(lines);
+            }
         }
     }
 
     /// Jump to the bottom (live view) for active session
     pub fn scroll_to_bottom(&mut self) {
-        if let Some(ref mut state) = self.session_state_cache {
-            state.scroll_offset = 0;
-            state.scroll_locked = false;
+        if let Some(ref session_id) = self.active_session_id.clone() {
+            if let Some(session) = self.session_manager.get_session_mut(&session_id) {
+                session.scroll_to_bottom();
+            }
         }
     }
 
@@ -458,9 +445,9 @@ impl App {
 
     /// Write input to active session's PTY
     pub fn write_to_pty(&mut self, data: &[u8]) -> Result<()> {
-        if let Some(ref session_id) = self.active_session_id {
-            if let Some(ref daemon) = self.daemon {
-                daemon.write_to_session(session_id, data)?;
+        if let Some(ref session_id) = self.active_session_id.clone() {
+            if let Some(session) = self.session_manager.get_session_mut(&session_id) {
+                session.write(data)?;
             }
         }
         Ok(())
@@ -473,10 +460,10 @@ impl App {
         let cols = (width * 75 / 100).saturating_sub(2);
         let rows = height.saturating_sub(3);
 
-        // Resize all sessions in daemon
-        if let Some(ref daemon) = self.daemon {
-            for session_id in self.session_to_claude_id.keys() {
-                let _ = daemon.resize_session(session_id, rows, cols);
+        // Resize all sessions directly
+        for session_id in self.session_manager.session_ids() {
+            if let Some(session) = self.session_manager.get_session_mut(&session_id) {
+                let _ = session.resize(rows, cols);
             }
         }
 
@@ -497,31 +484,11 @@ impl App {
 
     /// Check all sessions for dead PTYs and clean up
     pub fn check_all_session_status(&mut self) {
-        if self.daemon.is_none() {
-            return;
-        }
-
-        let daemon = self.daemon.as_ref().unwrap();
-
-        // Get list of sessions from daemon
-        let sessions = match daemon.list_sessions() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-        // Find alive session IDs
-        let alive_ids: HashSet<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
-
-        // Remove sessions that are no longer in daemon
-        let dead_sessions: Vec<String> = self
-            .session_to_claude_id
-            .keys()
-            .filter(|id| !alive_ids.contains(*id))
-            .cloned()
-            .collect();
+        // Clean up dead sessions from the session manager
+        let dead_sessions = self.session_manager.cleanup_dead();
 
         for session_id in dead_sessions {
-            // Get the Claude session ID before removing
+            // Get the Claude session ID before removing from our mapping
             let claude_id = self.session_to_claude_id.remove(&session_id);
 
             // Remove from ephemeral sessions if present
@@ -599,8 +566,71 @@ impl App {
 
             if should_reload {
                 if self.load_conversations().is_ok() {
+                    self.cleanup_persisted_ephemeral_sessions();
                     self.last_refresh = Some(Instant::now());
                     self.last_refresh_was_auto = true;
+                }
+            }
+        }
+    }
+
+    /// Remove ephemeral sessions that have been persisted to disk
+    /// Remove ephemeral sessions that have been persisted to disk
+    /// and update session mappings to point to the discovered conversations.
+    ///
+    /// When a new conversation is started, it appears in `ephemeral_sessions` until
+    /// Claude writes the .jsonl file. Once the file exists and is discovered during
+    /// `load_conversations()`, we need to:
+    /// 1. Update `session_to_claude_id` to map daemon_id -> actual Claude session ID
+    /// 2. Update `selected_conversation` if this is the active session
+    /// 3. Remove the ephemeral entry to avoid duplicate sidebar entries
+    fn cleanup_persisted_ephemeral_sessions(&mut self) {
+        // Build a map: project_path -> most recent conversation for that project
+        let mut recent_by_project: HashMap<PathBuf, &Conversation> = HashMap::new();
+        for group in &self.groups {
+            for conv in group.conversations() {
+                let path = &conv.project_path;
+                if let Some(existing) = recent_by_project.get(path) {
+                    if conv.timestamp > existing.timestamp {
+                        recent_by_project.insert(path.clone(), conv);
+                    }
+                } else {
+                    recent_by_project.insert(path.clone(), conv);
+                }
+            }
+        }
+
+        // Collect ephemeral sessions to process (avoid borrow issues)
+        let ephemeral_to_process: Vec<(String, PathBuf)> = self
+            .ephemeral_sessions
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        // For each ephemeral session, check if there's now a discovered conversation
+        // in the same project directory
+        for (daemon_id, project_path) in ephemeral_to_process {
+            // Check if this ephemeral session's Claude ID is still None
+            let needs_update = self
+                .session_to_claude_id
+                .get(&daemon_id)
+                .map(|opt| opt.is_none())
+                .unwrap_or(false);
+
+            if needs_update {
+                // Find the most recent conversation for this project path
+                if let Some(conv) = recent_by_project.get(&project_path) {
+                    // Update the daemon → Claude ID mapping
+                    self.session_to_claude_id
+                        .insert(daemon_id.clone(), Some(conv.session_id.clone()));
+
+                    // If this is the active session, update selected_conversation
+                    if self.active_session_id.as_ref() == Some(&daemon_id) {
+                        self.selected_conversation = Some((*conv).clone());
+                    }
+
+                    // Remove from ephemeral_sessions
+                    self.ephemeral_sessions.remove(&daemon_id);
                 }
             }
         }
@@ -609,6 +639,7 @@ impl App {
     /// Manual refresh triggered by user (e.g., pressing 'r')
     pub fn manual_refresh(&mut self) -> Result<()> {
         self.load_conversations()?;
+        self.cleanup_persisted_ephemeral_sessions();
         self.last_refresh = Some(Instant::now());
         self.last_refresh_was_auto = false;
         Ok(())
@@ -633,5 +664,105 @@ impl App {
             .as_ref()
             .map(|s| s.rows.saturating_sub(2) as usize)
             .unwrap_or(20)
+    }
+
+    /// Check if chord has timed out and reset if so
+    pub fn check_chord_timeout(&mut self) {
+        if self.chord_state.is_expired() {
+            self.chord_state = ChordState::None;
+        }
+    }
+
+    /// Close a session by its ID, cleaning up all associated state
+    pub fn close_session(&mut self, session_id: &str) {
+        // Close the session in the manager
+        self.session_manager.close_session(session_id);
+
+        // Remove from session_to_claude_id mapping
+        self.session_to_claude_id.remove(session_id);
+
+        // Remove from ephemeral_sessions if present
+        self.ephemeral_sessions.remove(session_id);
+
+        // Clear active_session_id if it was the closed one
+        if self.active_session_id.as_ref() == Some(&session_id.to_string()) {
+            self.active_session_id = None;
+            self.session_state_cache = None;
+            // Return focus to sidebar
+            self.focus = Focus::Sidebar;
+        }
+    }
+
+    /// Close the currently selected session in the sidebar
+    ///
+    /// For conversations: finds the running daemon session and closes it
+    /// For ephemeral sessions: closes the session directly
+    /// For other items (headers, show more): no-op
+    pub fn close_selected_session(&mut self) {
+        let items = self.sidebar_items();
+        let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
+
+        match items.get(selected) {
+            Some(SidebarItem::Conversation { group_key, index }) => {
+                // Find the conversation's Claude session ID
+                let mut claude_session_id: Option<String> = None;
+                for group in &self.groups {
+                    if &group.key() == group_key {
+                        if let Some(conv) = group.conversations().get(*index) {
+                            claude_session_id = Some(conv.session_id.clone());
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(cid) = claude_session_id {
+                    // Find the daemon session ID that maps to this Claude session
+                    let daemon_session_id = self
+                        .session_to_claude_id
+                        .iter()
+                        .find(|(_, v)| **v == Some(cid.clone()))
+                        .map(|(k, _)| k.clone());
+
+                    if let Some(dsid) = daemon_session_id {
+                        self.close_session(&dsid);
+                    }
+                }
+            }
+            Some(SidebarItem::EphemeralSession { session_id, .. }) => {
+                // Close the ephemeral session directly
+                let session_id = session_id.clone();
+                self.close_session(&session_id);
+            }
+            Some(SidebarItem::GroupHeader { .. })
+            | Some(SidebarItem::ShowMoreProjects { .. })
+            | Some(SidebarItem::ShowMoreConversations { .. })
+            | None => {
+                // No-op for non-session items
+            }
+        }
+    }
+}
+
+/// Chord state timeout duration (500ms)
+const CHORD_TIMEOUT_MS: u64 = 500;
+
+impl ChordState {
+    /// Check if the chord has expired (timed out)
+    pub fn is_expired(&self) -> bool {
+        match self {
+            ChordState::None => false,
+            ChordState::DeletePending { started_at } => {
+                started_at.elapsed().as_millis() as u64 > CHORD_TIMEOUT_MS
+            }
+        }
+    }
+
+    /// Get display text for pending chord (for UI feedback)
+    /// Returns Some("d") when delete is pending, None otherwise
+    pub fn pending_display(&self) -> Option<&'static str> {
+        match self {
+            ChordState::None => None,
+            ChordState::DeletePending { .. } => Some("d"),
+        }
     }
 }

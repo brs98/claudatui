@@ -26,6 +26,8 @@ pub struct SidebarState {
     pub show_all_projects: bool,
     /// Group keys that have all conversations expanded (not limited to DEFAULT_VISIBLE_CONVERSATIONS)
     pub expanded_conversations: std::collections::HashSet<String>,
+    /// When true, hide Idle sessions (only show Active, WaitingForInput, or running sessions)
+    pub hide_inactive: bool,
 }
 
 impl SidebarState {
@@ -54,6 +56,10 @@ impl SidebarState {
             self.expanded_conversations.insert(group_key.to_string());
         }
     }
+
+    pub fn toggle_hide_inactive(&mut self) {
+        self.hide_inactive = !self.hide_inactive;
+    }
 }
 
 /// Sidebar widget for displaying conversations
@@ -64,6 +70,8 @@ pub struct Sidebar<'a> {
     running_sessions: &'a std::collections::HashSet<String>,
     /// Ephemeral sessions: temp session_id -> project path
     ephemeral_sessions: &'a HashMap<String, PathBuf>,
+    /// Whether to hide inactive (Idle) sessions
+    hide_inactive: bool,
 }
 
 impl<'a> Sidebar<'a> {
@@ -72,12 +80,14 @@ impl<'a> Sidebar<'a> {
         focused: bool,
         running_sessions: &'a std::collections::HashSet<String>,
         ephemeral_sessions: &'a HashMap<String, PathBuf>,
+        hide_inactive: bool,
     ) -> Self {
         Self {
             groups,
             focused,
             running_sessions,
             ephemeral_sessions,
+            hide_inactive,
         }
     }
 }
@@ -92,8 +102,14 @@ impl<'a> StatefulWidget for Sidebar<'a> {
             Style::default().fg(Color::DarkGray)
         };
 
+        let title = if self.hide_inactive {
+            " Conversations (active) "
+        } else {
+            " Conversations "
+        };
+
         let block = Block::default()
-            .title(" Conversations ")
+            .title(title)
             .borders(Borders::ALL)
             .border_style(border_style);
 
@@ -107,6 +123,7 @@ impl<'a> StatefulWidget for Sidebar<'a> {
             &state.expanded_conversations,
             self.running_sessions,
             self.ephemeral_sessions,
+            self.hide_inactive,
         );
         let list = List::new(items)
             .highlight_style(
@@ -127,6 +144,7 @@ fn build_list_items(
     expanded_conversations: &std::collections::HashSet<String>,
     running_sessions: &std::collections::HashSet<String>,
     ephemeral_sessions: &HashMap<String, PathBuf>,
+    hide_inactive: bool,
 ) -> Vec<ListItem<'static>> {
     let mut items = Vec::new();
 
@@ -151,6 +169,7 @@ fn build_list_items(
         // Conversations and ephemeral sessions (if not collapsed)
         if !is_collapsed {
             // First, show ephemeral sessions for this group at the top
+            // (ephemeral sessions are always shown - they're running by definition)
             let group_project_path = group.project_path();
             if let Some(project_path) = group_project_path {
                 for (session_id, path) in ephemeral_sessions {
@@ -168,17 +187,30 @@ fn build_list_items(
                 }
             }
 
-            // Determine how many conversations to show
+            // Get all conversations and filter if hide_inactive is enabled
             let conversations = group.conversations();
-            let is_expanded = expanded_conversations.contains(&group_key);
-            let visible_convos = if is_expanded || conversations.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
+            let filtered_convos: Vec<_> = if hide_inactive {
                 conversations
+                    .iter()
+                    .filter(|conv| {
+                        let is_running = running_sessions.contains(&conv.session_id);
+                        is_running || !matches!(conv.status, ConversationStatus::Idle)
+                    })
+                    .collect()
             } else {
-                &conversations[..DEFAULT_VISIBLE_CONVERSATIONS]
+                conversations.iter().collect()
+            };
+
+            // Determine how many conversations to show (from filtered list)
+            let is_expanded = expanded_conversations.contains(&group_key);
+            let visible_convos: Vec<_> = if is_expanded || filtered_convos.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
+                filtered_convos.iter().copied().collect()
+            } else {
+                filtered_convos.iter().take(DEFAULT_VISIBLE_CONVERSATIONS).copied().collect()
             };
 
             // Then show saved conversations (limited or all)
-            for conv in visible_convos {
+            for conv in &visible_convos {
                 // If session is running in background, show it as Active
                 // regardless of the file-based status
                 let is_running = running_sessions.contains(&conv.session_id);
@@ -206,9 +238,9 @@ fn build_list_items(
                 ])));
             }
 
-            // Add "show more conversations" if truncated
-            if !is_expanded && conversations.len() > DEFAULT_VISIBLE_CONVERSATIONS {
-                let hidden = conversations.len() - DEFAULT_VISIBLE_CONVERSATIONS;
+            // Add "show more conversations" if truncated (use filtered count)
+            if !is_expanded && filtered_convos.len() > DEFAULT_VISIBLE_CONVERSATIONS {
+                let hidden = filtered_convos.len() - DEFAULT_VISIBLE_CONVERSATIONS;
                 items.push(ListItem::new(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
@@ -258,6 +290,8 @@ pub fn build_sidebar_items(
     show_all_projects: bool,
     expanded_conversations: &std::collections::HashSet<String>,
     ephemeral_sessions: &HashMap<String, PathBuf>,
+    running_sessions: &std::collections::HashSet<String>,
+    hide_inactive: bool,
 ) -> Vec<SidebarItem> {
     let mut items = Vec::new();
 
@@ -276,6 +310,7 @@ pub fn build_sidebar_items(
 
         if !collapsed.contains(&group_key) {
             // First, add ephemeral sessions for this group
+            // (ephemeral sessions are always shown - they're running by definition)
             let group_project_path = group.project_path();
             if let Some(project_path) = group_project_path {
                 for (session_id, path) in ephemeral_sessions {
@@ -288,28 +323,44 @@ pub fn build_sidebar_items(
                 }
             }
 
-            // Determine how many conversations to show
+            // Get all conversations and filter if hide_inactive is enabled
+            // We keep track of original indices so lookup in app.rs still works
             let conversations = group.conversations();
-            let is_expanded = expanded_conversations.contains(&group_key);
-            let visible_count = if is_expanded || conversations.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
-                conversations.len()
+            let filtered_indices: Vec<usize> = if hide_inactive {
+                conversations
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, conv)| {
+                        let is_running = running_sessions.contains(&conv.session_id);
+                        is_running || !matches!(conv.status, ConversationStatus::Idle)
+                    })
+                    .map(|(idx, _)| idx)
+                    .collect()
             } else {
-                DEFAULT_VISIBLE_CONVERSATIONS
+                (0..conversations.len()).collect()
+            };
+
+            // Determine how many conversations to show (from filtered list)
+            let is_expanded = expanded_conversations.contains(&group_key);
+            let visible_indices: Vec<usize> = if is_expanded || filtered_indices.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
+                filtered_indices.clone()
+            } else {
+                filtered_indices.iter().take(DEFAULT_VISIBLE_CONVERSATIONS).copied().collect()
             };
 
             // Then add saved conversations (limited or all)
-            for index in 0..visible_count {
+            for index in visible_indices {
                 items.push(SidebarItem::Conversation {
                     group_key: group_key.clone(),
                     index,
                 });
             }
 
-            // Add "show more conversations" if truncated
-            if !is_expanded && conversations.len() > DEFAULT_VISIBLE_CONVERSATIONS {
+            // Add "show more conversations" if truncated (use filtered count)
+            if !is_expanded && filtered_indices.len() > DEFAULT_VISIBLE_CONVERSATIONS {
                 items.push(SidebarItem::ShowMoreConversations {
                     group_key: group_key.clone(),
-                    hidden_count: conversations.len() - DEFAULT_VISIBLE_CONVERSATIONS,
+                    hidden_count: filtered_indices.len() - DEFAULT_VISIBLE_CONVERSATIONS,
                 });
             }
         }

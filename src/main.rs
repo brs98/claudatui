@@ -1,7 +1,5 @@
 mod app;
 mod claude;
-mod daemon;
-mod daemon_client;
 mod event;
 mod pty;
 mod session;
@@ -31,7 +29,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use app::{App, Focus};
+use app::{App, ChordState, Focus};
 use ui::layout::create_layout_with_help;
 use ui::sidebar::Sidebar;
 use ui::terminal_pane::TerminalPane;
@@ -107,7 +105,13 @@ fn run_app(
     let mut hot_reload_status = HotReloadStatus::None;
 
     loop {
-        // Update session state from daemon
+        // Check if chord has timed out
+        app.check_chord_timeout();
+
+        // Process all PTY output (direct, no daemon)
+        app.session_manager.process_all_output();
+
+        // Update session state cache for rendering
         app.update_session_state();
 
         // Check all sessions for dead PTYs and clean up
@@ -208,6 +212,20 @@ fn handle_key_event(
 }
 
 fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    // Handle chord sequences first
+    if let ChordState::DeletePending { .. } = app.chord_state {
+        if key.code == KeyCode::Char('d') {
+            // Second 'd' pressed - close selected session
+            app.chord_state = ChordState::None;
+            app.close_selected_session();
+            return Ok(KeyAction::Continue);
+        } else {
+            // Any other key cancels the chord
+            app.chord_state = ChordState::None;
+            // Fall through to handle the key normally
+        }
+    }
+
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => app.navigate_down(),
         KeyCode::Char('k') | KeyCode::Up => app.navigate_up(),
@@ -215,6 +233,17 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
         KeyCode::Char('G') => app.jump_to_last(),
         KeyCode::Char(' ') => app.toggle_current_group(),
         KeyCode::Char('r') => app.manual_refresh()?,
+        KeyCode::Char('a') => app.sidebar_state.toggle_hide_inactive(),
+        KeyCode::Char('d') => {
+            // Start delete chord sequence
+            app.chord_state = ChordState::DeletePending {
+                started_at: std::time::Instant::now(),
+            };
+        }
+        KeyCode::Esc => {
+            // Cancel any pending chord
+            app.chord_state = ChordState::None;
+        }
         KeyCode::Enter => {
             app.open_selected()?;
         }
@@ -357,6 +386,7 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
         app.focus == Focus::Sidebar,
         &running_sessions,
         &app.ephemeral_sessions,
+        app.sidebar_state.hide_inactive,
     );
     f.render_stateful_widget(sidebar, sidebar_area, &mut app.sidebar_state);
 
@@ -388,16 +418,32 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
 }
 
 fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
-    // Check for recent refresh to show feedback (visible for 2 seconds)
-    if let Some((is_auto, _elapsed)) = app.recent_refresh(2000) {
-        let label = if is_auto { " AUTO-REFRESHED " } else { " REFRESHED " };
+    // Check for pending chord sequence first (highest priority)
+    if let Some(pending) = app.chord_state.pending_display() {
         let msg = Paragraph::new(Line::from(vec![
-            Span::styled(label, Style::default().fg(Color::Black).bg(Color::Green)),
-            Span::raw(" Sessions list updated"),
+            Span::styled(" PENDING ", Style::default().fg(Color::Black).bg(Color::Yellow)),
+            Span::raw(format!(
+                " {} (press {} again to delete, Esc to cancel)",
+                pending, pending
+            )),
         ]))
         .style(Style::default().bg(Color::DarkGray));
         f.render_widget(msg, area);
         return;
+    }
+
+    // Check for recent manual refresh to show feedback (visible for 2 seconds)
+    // Auto-refreshes are silent to reduce notification noise
+    if let Some((is_auto, _elapsed)) = app.recent_refresh(2000) {
+        if !is_auto {
+            let msg = Paragraph::new(Line::from(vec![
+                Span::styled(" REFRESHED ", Style::default().fg(Color::Black).bg(Color::Green)),
+                Span::raw(" Sessions list updated"),
+            ]))
+            .style(Style::default().bg(Color::DarkGray));
+            f.render_widget(msg, area);
+            return;
+        }
     }
 
     let help_text = match app.focus {
@@ -407,12 +453,14 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
                 Span::raw("nav "),
                 Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
                 Span::raw("open "),
+                Span::styled(" dd ", Style::default().fg(Color::Cyan)),
+                Span::raw("close "),
                 Span::styled(" Space ", Style::default().fg(Color::Cyan)),
                 Span::raw("toggle "),
+                Span::styled(" a ", Style::default().fg(Color::Cyan)),
+                Span::raw("active "),
                 Span::styled(" C-l ", Style::default().fg(Color::Cyan)),
-                Span::raw("terminal "),
-                Span::styled(" r ", Style::default().fg(Color::Cyan)),
-                Span::raw("refresh "),
+                Span::raw("term "),
                 Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
                 Span::raw("quit"),
             ]

@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
-use crate::daemon::protocol::{CellAttrs, ScreenState, SessionState, TermColor};
+use crate::session::{CellAttrs, ScreenState, SessionState, TermColor};
 
 /// Terminal pane widget for displaying PTY output from daemon.
 pub struct TerminalPane<'a> {

@@ -124,13 +124,13 @@ fn discover_session_files(project_dir: &Path) -> HashMap<String, SessionFile> {
             _ => continue,
         };
 
-        // Get file modification time
+        // Get file modification time in milliseconds (to match indexed session format)
         let file_mtime = match entry.metadata() {
             Ok(meta) => meta
                 .modified()
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
+                .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
             Err(_) => 0,
         };
@@ -175,6 +175,13 @@ fn parse_first_user_prompt(path: &Path) -> Option<String> {
                 for item in arr {
                     if item.get("type").and_then(|t| t.as_str()) == Some("text") {
                         if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                            let trimmed = text.trim();
+                            // Skip empty or system markers
+                            if trimmed.is_empty()
+                                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                            {
+                                continue;
+                            }
                             return Some(truncate_prompt(text));
                         }
                     }
@@ -188,8 +195,13 @@ fn parse_first_user_prompt(path: &Path) -> Option<String> {
             _ => continue,
         };
 
-        // Skip empty prompts
-        if text.trim().is_empty() {
+        // Skip empty prompts and system-generated markers
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Skip system markers like "[Request interrupted by user]"
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
             continue;
         }
 
@@ -307,8 +319,11 @@ pub fn parse_all_sessions(claude_dir: &Path) -> Result<Vec<SessionEntry>> {
                 all_entries.push(SessionEntry::from(cached.clone()));
             } else {
                 // Not in cache - parse first prompt on-demand
-                let first_prompt = parse_first_user_prompt(&session_file.path)
-                    .unwrap_or_else(|| "New session".to_string());
+                // Skip sessions with no user content (empty/abandoned sessions)
+                let first_prompt = match parse_first_user_prompt(&session_file.path) {
+                    Some(prompt) => prompt,
+                    None => continue, // Skip empty sessions
+                };
 
                 // Create entry with minimal metadata
                 all_entries.push(SessionEntry {
