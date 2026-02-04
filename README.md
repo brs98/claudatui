@@ -14,8 +14,18 @@ A TUI (Terminal User Interface) for browsing and managing Claude Code conversati
 
 ### Prerequisites
 
-- Rust 1.70+ (install via [rustup](https://rustup.rs/))
+- Rust 1.88+ (install via [rustup](https://rustup.rs/))
 - A working [Claude Code](https://claude.ai/claude-code) installation
+
+To check your Rust version:
+```bash
+rustc --version
+```
+
+To update Rust:
+```bash
+rustup update
+```
 
 ### From Source
 
