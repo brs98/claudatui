@@ -27,21 +27,18 @@ To update Rust:
 rustup update
 ```
 
+### From crates.io (Recommended)
+
+```bash
+cargo install claudatui
+```
+
 ### From Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/brs98/claudatui.git
 cd claudatui
-
-# Build and install
 cargo install --path .
-```
-
-### Using Cargo
-
-```bash
-cargo install --git https://github.com/brs98/claudatui.git
 ```
 
 ## Usage
