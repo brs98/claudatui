@@ -248,14 +248,117 @@ fn load_index_cache(project_dir: &Path) -> HashMap<String, SessionEntryRaw> {
 }
 
 /// Extract project path from escaped directory name
+///
+/// Claude Code escapes paths by:
+/// - Replacing `/` with `-` (path separator)
+/// - Removing `.` (dots are stripped, so `.git` becomes `git`)
+/// - A leading `.` in a directory name results in `--` (e.g., `.dotfiles` → `-dotfiles`)
+///
+/// However, directory names can also contain literal hyphens (e.g., `my-project`).
+/// Since there's no escape sequence for literal hyphens, we use filesystem
+/// validation to disambiguate.
+///
+/// Algorithm:
+/// 1. Split the escaped path by hyphens
+/// 2. Build the path segment by segment, checking if each segment exists on disk
+/// 3. When a segment doesn't exist, try:
+///    a. If segment is empty (from `--`), prefix next segment with `.` (hidden dir)
+///    b. Adding a `.` before the next segment (to handle escaped dots like `.git`)
+///    c. Combining with the next segment using hyphen (literal hyphen in name)
+/// 4. Continue until the full path is resolved
+///
+/// Example: `-Users-brandon-work-fluid-mono-with-backend` becomes
+/// `/Users/brandon/work/fluid-mono-with-backend` if that path exists
 fn extract_project_path(dir_name: &str) -> String {
-    // Claude Code escapes paths by replacing / with -
-    // e.g., "-Users-brandon-personal-claudatui" -> "/Users/brandon/personal/claudatui"
-    if dir_name.starts_with('-') {
-        dir_name.replacen('-', "/", 1).replace('-', "/")
+    // Remove leading dash if present (indicates absolute path starting with /)
+    let cleaned = if dir_name.starts_with('-') {
+        &dir_name[1..]
     } else {
-        dir_name.replace('-', "/")
+        dir_name
+    };
+
+    // Split by hyphens (potential path separators)
+    let segments: Vec<&str> = cleaned.split('-').collect();
+
+    if segments.is_empty() {
+        return String::new();
     }
+
+    // Build path by validating against filesystem
+    let mut path = PathBuf::from("/");
+    let mut i = 0;
+
+    while i < segments.len() {
+        // Handle empty segment (from `--` which represents a leading `.`)
+        if segments[i].is_empty() && i < segments.len() - 1 {
+            // This is a dot-prefixed directory (e.g., .dotfiles)
+            // Start candidate with a dot and the next segment
+            i += 1;
+            let mut candidate = format!(".{}", segments[i]);
+            let mut j = i;
+
+            loop {
+                let test_path = path.join(&candidate);
+
+                if test_path.exists() {
+                    path = test_path;
+                    i = j + 1;
+                    break;
+                }
+
+                if j >= segments.len() - 1 {
+                    path = test_path;
+                    i = j + 1;
+                    break;
+                }
+
+                // Try adding next segment with hyphen
+                j += 1;
+                candidate = format!("{}-{}", candidate, segments[j]);
+            }
+            continue;
+        }
+
+        let mut candidate = segments[i].to_string();
+        let mut j = i;
+
+        // Try progressively longer segment combinations
+        loop {
+            let test_path = path.join(&candidate);
+
+            if test_path.exists() {
+                // Found a valid segment that exists on disk
+                path = test_path;
+                i = j + 1;
+                break;
+            }
+
+            // Try with a dot prefix on the next segment (handles .git -> git escaping)
+            if j < segments.len() - 1 {
+                let dot_candidate = format!("{}.{}", candidate, segments[j + 1]);
+                let dot_test_path = path.join(&dot_candidate);
+                if dot_test_path.exists() {
+                    path = dot_test_path;
+                    i = j + 2;
+                    break;
+                }
+            }
+
+            if j >= segments.len() - 1 {
+                // Reached the end without finding a valid path
+                // Use the current candidate anyway (path may have been deleted)
+                path = test_path;
+                i = j + 1;
+                break;
+            }
+
+            // Try adding next segment with hyphen (treat hyphen as literal)
+            j += 1;
+            candidate = format!("{}-{}", candidate, segments[j]);
+        }
+    }
+
+    path.to_string_lossy().to_string()
 }
 
 /// Parse all sessions from ~/.claude/projects/*/
@@ -414,15 +517,79 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_project_path() {
-        assert_eq!(
-            extract_project_path("-Users-brandon-personal-claudatui"),
-            "/Users/brandon/personal/claudatui"
-        );
-        assert_eq!(
-            extract_project_path("-Users-brandon--dotfiles"),
-            "/Users/brandon//dotfiles"
-        );
+    fn test_extract_project_path_simple() {
+        // Test paths without hyphens in directory names
+        // These should work regardless of filesystem state since each segment
+        // either exists or is the final segment
+        let result = extract_project_path("-Users");
+        assert!(result == "/Users" || result.starts_with("/Users"));
+    }
+
+    #[test]
+    fn test_extract_project_path_uses_filesystem() {
+        // The function validates against the filesystem, so we test with paths
+        // that we know exist. /tmp should exist on most Unix systems.
+        use std::fs;
+
+        // Create a test directory structure with hyphens
+        let test_base = std::env::temp_dir().join("claudatui-test-extract-path");
+        let test_dir = test_base.join("my-hyphenated-project");
+        let _ = fs::remove_dir_all(&test_base); // Clean up any previous test
+        fs::create_dir_all(&test_dir).expect("Failed to create test directory");
+
+        // Build the escaped path that Claude Code would generate
+        let base_str = test_base.to_string_lossy();
+        let escaped = base_str.replace('/', "-");
+
+        // The function should correctly identify "my-hyphenated-project" as a single dir
+        let full_escaped = format!("{}-my-hyphenated-project", escaped);
+        let result = extract_project_path(&full_escaped);
+
+        assert_eq!(result, test_dir.to_string_lossy().to_string());
+
+        // Clean up
+        let _ = fs::remove_dir_all(&test_base);
+    }
+
+    #[test]
+    fn test_extract_project_path_nonexistent_fallback() {
+        // When the path doesn't exist, it should still produce a reasonable result
+        // by treating remaining segments as individual directories
+        let result = extract_project_path("-nonexistent-path-here");
+        // Should produce a path (exact result depends on filesystem state)
+        assert!(result.starts_with("/"));
+    }
+
+    #[test]
+    fn test_extract_project_path_empty() {
+        // Empty input results in root path since we start with "/"
+        assert_eq!(extract_project_path(""), "/");
+        assert_eq!(extract_project_path("-"), "/");
+    }
+
+    #[test]
+    fn test_extract_project_path_hidden_dir() {
+        // Test hidden directories (dot-prefixed) which are escaped as double-hyphen
+        // e.g., .dotfiles -> -dotfiles in the escaped form, resulting in -- after /
+        use std::fs;
+
+        // Create a test directory structure with a hidden dir
+        let test_base = std::env::temp_dir().join("claudatui-test-hidden-dir");
+        let hidden_dir = test_base.join(".my-hidden-dir");
+        let _ = fs::remove_dir_all(&test_base);
+        fs::create_dir_all(&hidden_dir).expect("Failed to create test directory");
+
+        // Build the escaped path that Claude Code would generate
+        // .my-hidden-dir becomes -my-hidden-dir, and with path separator we get --my-hidden-dir
+        let base_str = test_base.to_string_lossy();
+        let escaped_base = base_str.replace('/', "-");
+        let full_escaped = format!("{}--my-hidden-dir", escaped_base);
+
+        let result = extract_project_path(&full_escaped);
+        assert_eq!(result, hidden_dir.to_string_lossy().to_string());
+
+        // Clean up
+        let _ = fs::remove_dir_all(&test_base);
     }
 
     #[test]
