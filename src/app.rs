@@ -13,6 +13,13 @@ use crate::claude::SessionsWatcher;
 use crate::session::{SessionManager, SessionState};
 use crate::ui::sidebar::{build_sidebar_items, SidebarItem, SidebarState};
 
+/// Clipboard status for feedback display
+#[derive(Debug, Clone)]
+pub enum ClipboardStatus {
+    None,
+    Copied { path: String, at: Instant },
+}
+
 /// Which pane is currently focused
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
@@ -76,6 +83,8 @@ pub struct App {
     last_refresh_was_auto: bool,
     /// State for tracking chord key sequences (e.g., "dd" to close)
     pub chord_state: ChordState,
+    /// Clipboard status for feedback display
+    pub clipboard_status: ClipboardStatus,
     /// Ordered list of group keys to maintain stable group order during auto-refresh
     group_order: Vec<String>,
 }
@@ -108,6 +117,7 @@ impl App {
             last_refresh: None,
             last_refresh_was_auto: false,
             chord_state: ChordState::None,
+            clipboard_status: ClipboardStatus::None,
             group_order: Vec::new(),
         };
 
@@ -784,6 +794,72 @@ impl App {
             | Some(SidebarItem::ShowMoreConversations { .. })
             | None => {
                 // No-op for non-session items
+            }
+        }
+    }
+
+    /// Copy the selected item's project path to the clipboard
+    pub fn copy_selected_path_to_clipboard(&mut self) {
+        let path = match self.get_selected_path() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        // Copy to clipboard using arboard
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let path_str = path.to_string_lossy().to_string();
+            if clipboard.set_text(&path_str).is_ok() {
+                self.clipboard_status = ClipboardStatus::Copied {
+                    path: path_str,
+                    at: Instant::now(),
+                };
+            }
+        }
+    }
+
+    /// Get the project path of the currently selected sidebar item
+    fn get_selected_path(&self) -> Option<&PathBuf> {
+        // First try selected conversation
+        if let Some(ref conv) = self.selected_conversation {
+            return Some(&conv.project_path);
+        }
+
+        // Also support group headers and ephemeral sessions (which represent a project)
+        let items = self.sidebar_items();
+        let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
+
+        match items.get(selected) {
+            Some(SidebarItem::GroupHeader { key, .. }) => {
+                for group in &self.groups {
+                    if &group.key() == key {
+                        // Get path from first conversation in group
+                        if let Some(conv) = group.conversations().first() {
+                            return Some(&conv.project_path);
+                        }
+                    }
+                }
+                None
+            }
+            Some(SidebarItem::EphemeralSession { session_id, .. }) => {
+                self.ephemeral_sessions
+                    .get(session_id)
+                    .map(|e| &e.project_path)
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if clipboard copy happened recently (for UI feedback)
+    pub fn recent_clipboard_copy(&self, within_ms: u64) -> Option<&str> {
+        match &self.clipboard_status {
+            ClipboardStatus::None => None,
+            ClipboardStatus::Copied { path, at } => {
+                let elapsed = at.elapsed().as_millis() as u64;
+                if elapsed < within_ms {
+                    Some(path.as_str())
+                } else {
+                    None
+                }
             }
         }
     }

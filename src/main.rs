@@ -236,6 +236,10 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
                 started_at: std::time::Instant::now(),
             };
         }
+        KeyCode::Char('y') => {
+            // Yank (copy) selected project path to clipboard
+            app.copy_selected_path_to_clipboard();
+        }
         KeyCode::Esc => {
             // Cancel any pending chord
             app.chord_state = ChordState::None;
@@ -428,6 +432,22 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    // Check for recent clipboard copy (visible for 2 seconds)
+    if let Some(path) = app.recent_clipboard_copy(2000) {
+        let display_path = if path.len() > 50 {
+            format!("...{}", &path[path.len() - 47..])
+        } else {
+            path.to_string()
+        };
+        let msg = Paragraph::new(Line::from(vec![
+            Span::styled(" COPIED ", Style::default().fg(Color::Black).bg(Color::Green)),
+            Span::raw(format!(" {}", display_path)),
+        ]))
+        .style(Style::default().bg(Color::DarkGray));
+        f.render_widget(msg, area);
+        return;
+    }
+
     // Check for recent manual refresh to show feedback (visible for 2 seconds)
     // Auto-refreshes are silent to reduce notification noise
     if let Some((is_auto, _elapsed)) = app.recent_refresh(2000) {
@@ -451,12 +471,12 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
                 Span::raw("open "),
                 Span::styled(" dd ", Style::default().fg(Color::Cyan)),
                 Span::raw("close "),
+                Span::styled(" y ", Style::default().fg(Color::Cyan)),
+                Span::raw("yank "),
                 Span::styled(" Space ", Style::default().fg(Color::Cyan)),
                 Span::raw("toggle "),
                 Span::styled(" a ", Style::default().fg(Color::Cyan)),
                 Span::raw("active "),
-                Span::styled(" C-l ", Style::default().fg(Color::Cyan)),
-                Span::raw("term "),
                 Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
                 Span::raw("quit"),
             ]
