@@ -5,7 +5,9 @@ use std::time::Instant;
 use anyhow::Result;
 
 use crate::claude::conversation::{detect_status_fast, Conversation, ConversationStatus};
-use crate::claude::grouping::{group_conversations, ConversationGroup};
+use crate::claude::grouping::{
+    group_conversations, group_conversations_unordered, order_groups_by_keys, ConversationGroup,
+};
 use crate::claude::sessions::{parse_all_sessions, SessionEntry};
 use crate::claude::SessionsWatcher;
 use crate::session::{SessionManager, SessionState};
@@ -67,6 +69,8 @@ pub struct App {
     last_refresh_was_auto: bool,
     /// State for tracking chord key sequences (e.g., "dd" to close)
     pub chord_state: ChordState,
+    /// Ordered list of group keys to maintain stable group order during auto-refresh
+    group_order: Vec<String>,
 }
 
 impl App {
@@ -97,18 +101,33 @@ impl App {
             last_refresh: None,
             last_refresh_was_auto: false,
             chord_state: ChordState::None,
+            group_order: Vec::new(),
         };
 
-        app.load_conversations()?;
+        app.load_conversations_full()?;
 
         Ok(app)
     }
 
-    /// Load conversations from sessions-index.json files
-    pub fn load_conversations(&mut self) -> Result<()> {
+    /// Load conversations with full re-sort (initial load and manual refresh).
+    /// Groups are sorted by most recent activity.
+    fn load_conversations_full(&mut self) -> Result<()> {
         let sessions = parse_all_sessions(&self.claude_dir)?;
         let conversations = self.sessions_to_conversations(sessions);
         self.groups = group_conversations(conversations);
+        self.group_order = self.groups.iter().map(|g| g.key()).collect();
+        Ok(())
+    }
+
+    /// Load conversations preserving existing group order (auto-refresh).
+    /// New groups appear at the front, existing groups maintain their position.
+    fn load_conversations_preserve_order(&mut self) -> Result<()> {
+        let sessions = parse_all_sessions(&self.claude_dir)?;
+        let conversations = self.sessions_to_conversations(sessions);
+        let groups = group_conversations_unordered(conversations);
+        let (ordered_groups, updated_order) = order_groups_by_keys(groups, &self.group_order);
+        self.groups = ordered_groups;
+        self.group_order = updated_order;
         Ok(())
     }
 
@@ -555,7 +574,8 @@ impl App {
         }
     }
 
-    /// Check for sessions-index.json changes and reload conversations if needed
+    /// Check for sessions-index.json changes and reload conversations if needed.
+    /// Uses preserve-order loading to maintain stable group positions during auto-refresh.
     pub fn check_sessions_updates(&mut self) {
         if let Some(ref watcher) = self.sessions_watcher {
             // Drain all pending notifications
@@ -565,7 +585,7 @@ impl App {
             }
 
             if should_reload {
-                if self.load_conversations().is_ok() {
+                if self.load_conversations_preserve_order().is_ok() {
                     self.cleanup_persisted_ephemeral_sessions();
                     self.last_refresh = Some(Instant::now());
                     self.last_refresh_was_auto = true;
@@ -636,9 +656,10 @@ impl App {
         }
     }
 
-    /// Manual refresh triggered by user (e.g., pressing 'r')
+    /// Manual refresh triggered by user (e.g., pressing 'r').
+    /// Performs a full re-sort of groups by most recent activity.
     pub fn manual_refresh(&mut self) -> Result<()> {
-        self.load_conversations()?;
+        self.load_conversations_full()?;
         self.cleanup_persisted_ephemeral_sessions();
         self.last_refresh = Some(Instant::now());
         self.last_refresh_was_auto = false;

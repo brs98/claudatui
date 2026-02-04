@@ -129,8 +129,16 @@ enum GroupKey {
     Ungrouped { path: PathBuf },
 }
 
-/// Group conversations by their project paths
+/// Group conversations by their project paths (with full sorting by recency)
 pub fn group_conversations(conversations: Vec<Conversation>) -> Vec<ConversationGroup> {
+    let mut groups = group_conversations_unordered(conversations);
+    sort_groups_by_recency(&mut groups);
+    groups
+}
+
+/// Group conversations without sorting groups (caller handles ordering).
+/// Conversations within each group are still sorted by timestamp (most recent first).
+pub fn group_conversations_unordered(conversations: Vec<Conversation>) -> Vec<ConversationGroup> {
     let mut groups: HashMap<GroupKey, Vec<Conversation>> = HashMap::new();
 
     for conv in conversations {
@@ -158,14 +166,7 @@ pub fn group_conversations(conversations: Vec<Conversation>) -> Vec<Conversation
         })
         .collect();
 
-    // Sort groups by most recent conversation
-    result.sort_by(|a, b| {
-        let a_time = a.conversations().iter().map(|c| c.timestamp).max().unwrap_or(0);
-        let b_time = b.conversations().iter().map(|c| c.timestamp).max().unwrap_or(0);
-        b_time.cmp(&a_time)
-    });
-
-    // Sort conversations within each group by timestamp
+    // Sort conversations within each group by timestamp (most recent first)
     for group in &mut result {
         group.conversations_mut().sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     }
@@ -173,9 +174,72 @@ pub fn group_conversations(conversations: Vec<Conversation>) -> Vec<Conversation
     result
 }
 
+/// Sort groups by most recent conversation (for initial/manual refresh)
+pub fn sort_groups_by_recency(groups: &mut Vec<ConversationGroup>) {
+    groups.sort_by(|a, b| {
+        let a_time = a.conversations().iter().map(|c| c.timestamp).max().unwrap_or(0);
+        let b_time = b.conversations().iter().map(|c| c.timestamp).max().unwrap_or(0);
+        b_time.cmp(&a_time)
+    });
+}
+
+/// Order groups according to a specified key order, with new groups at front.
+///
+/// Groups that exist in `key_order` are placed in that order.
+/// Groups that are new (not in `key_order`) are placed at the front, sorted by recency.
+/// Returns the ordered groups and the updated key order.
+pub fn order_groups_by_keys(
+    mut groups: Vec<ConversationGroup>,
+    key_order: &[String],
+) -> (Vec<ConversationGroup>, Vec<String>) {
+    // Separate new groups (not in key_order) from existing groups
+    let key_set: std::collections::HashSet<&String> = key_order.iter().collect();
+    let (mut new_groups, existing_groups): (Vec<_>, Vec<_>) = groups
+        .drain(..)
+        .partition(|g| !key_set.contains(&g.key()));
+
+    // Sort new groups by recency (most recent first)
+    sort_groups_by_recency(&mut new_groups);
+
+    // Build a map for quick lookup of existing groups by key
+    let mut groups_by_key: HashMap<String, ConversationGroup> = existing_groups
+        .into_iter()
+        .map(|g| (g.key(), g))
+        .collect();
+
+    // Build result: new groups first (sorted by recency), then existing groups in key_order
+    let mut result: Vec<ConversationGroup> = new_groups;
+    for key in key_order {
+        if let Some(group) = groups_by_key.remove(key) {
+            result.push(group);
+        }
+        // Groups that were in key_order but no longer exist are naturally skipped
+    }
+
+    // Build updated key order from result
+    let updated_order: Vec<String> = result.iter().map(|g| g.key()).collect();
+
+    (result, updated_order)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude::conversation::{Conversation, ConversationStatus};
+
+    fn make_conversation(project_path: &str, timestamp: i64) -> Conversation {
+        Conversation {
+            session_id: format!("session-{}", timestamp),
+            display: format!("Conv at {}", timestamp),
+            summary: None,
+            timestamp,
+            modified: format!("2024-01-01T00:00:{}Z", timestamp),
+            project_path: PathBuf::from(project_path),
+            status: ConversationStatus::Idle,
+            message_count: 1,
+            git_branch: None,
+        }
+    }
 
     #[test]
     fn test_extract_worktree_group() {
@@ -194,5 +258,71 @@ mod tests {
             GroupKey::Directory { ref parent, ref project, .. }
             if parent == "personal" && project == "myproject"
         ));
+    }
+
+    #[test]
+    fn test_order_groups_by_keys_preserves_order() {
+        // Create conversations for different projects
+        let convs = vec![
+            make_conversation("/Users/brandon/personal/project-a", 100),
+            make_conversation("/Users/brandon/personal/project-b", 200),
+            make_conversation("/Users/brandon/personal/project-c", 300),
+        ];
+
+        // Group them (will be sorted by recency: c, b, a)
+        let groups = group_conversations(convs);
+        assert_eq!(groups.len(), 3);
+
+        // Capture the initial order
+        let key_order: Vec<String> = groups.iter().map(|g| g.key()).collect();
+
+        // Create new conversations with updated timestamps
+        // project-a now has the most recent activity
+        let new_convs = vec![
+            make_conversation("/Users/brandon/personal/project-a", 500), // Most recent!
+            make_conversation("/Users/brandon/personal/project-b", 200),
+            make_conversation("/Users/brandon/personal/project-c", 300),
+        ];
+
+        // Use unordered grouping + order_by_keys to preserve original order
+        let new_groups = group_conversations_unordered(new_convs);
+        let (ordered_groups, _) = order_groups_by_keys(new_groups, &key_order);
+
+        // Order should be preserved (c, b, a) even though a has newer activity
+        let result_order: Vec<String> = ordered_groups.iter().map(|g| g.key()).collect();
+        assert_eq!(result_order, key_order);
+    }
+
+    #[test]
+    fn test_order_groups_by_keys_new_groups_at_front() {
+        // Create conversations for two projects
+        let convs = vec![
+            make_conversation("/Users/brandon/personal/project-a", 100),
+            make_conversation("/Users/brandon/personal/project-b", 200),
+        ];
+
+        let groups = group_conversations(convs);
+        let key_order: Vec<String> = groups.iter().map(|g| g.key()).collect();
+
+        // Now add a new project
+        let new_convs = vec![
+            make_conversation("/Users/brandon/personal/project-a", 100),
+            make_conversation("/Users/brandon/personal/project-b", 200),
+            make_conversation("/Users/brandon/personal/project-new", 150), // New project!
+        ];
+
+        let new_groups = group_conversations_unordered(new_convs);
+        let (ordered_groups, updated_order) = order_groups_by_keys(new_groups, &key_order);
+
+        // New project should be at front
+        assert_eq!(ordered_groups.len(), 3);
+        assert!(ordered_groups[0].key().contains("project-new"));
+
+        // Existing projects should maintain their relative order
+        assert!(ordered_groups[1].key().contains("project-b"));
+        assert!(ordered_groups[2].key().contains("project-a"));
+
+        // Updated order should reflect new state
+        assert_eq!(updated_order.len(), 3);
     }
 }
