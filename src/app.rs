@@ -30,6 +30,13 @@ pub enum ChordState {
     DeletePending { started_at: Instant },
 }
 
+/// Tracks an ephemeral session (new conversation not yet persisted to disk)
+#[derive(Clone, Debug)]
+pub struct EphemeralSession {
+    pub project_path: PathBuf,
+    pub created_at: i64, // Unix timestamp when session was created
+}
+
 /// Application state
 pub struct App {
     /// Path to ~/.claude
@@ -59,8 +66,8 @@ pub struct App {
     #[allow(dead_code)]
     new_session_counter: usize,
     /// Running sessions that haven't been saved yet (temp IDs)
-    /// Maps daemon session_id -> project path
-    pub ephemeral_sessions: HashMap<String, PathBuf>,
+    /// Maps daemon session_id -> ephemeral session info
+    pub ephemeral_sessions: HashMap<String, EphemeralSession>,
     /// Watcher for sessions-index.json changes
     sessions_watcher: Option<SessionsWatcher>,
     /// Timestamp of last refresh (for UI feedback)
@@ -388,8 +395,13 @@ impl App {
 
         // Track ephemeral sessions (new sessions without a saved conversation file)
         if claude_session_id.is_none() {
-            self.ephemeral_sessions
-                .insert(session_id.clone(), working_dir.to_path_buf());
+            self.ephemeral_sessions.insert(
+                session_id.clone(),
+                EphemeralSession {
+                    project_path: working_dir.to_path_buf(),
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                },
+            );
         }
 
         self.active_session_id = Some(session_id);
@@ -595,7 +607,6 @@ impl App {
     }
 
     /// Remove ephemeral sessions that have been persisted to disk
-    /// Remove ephemeral sessions that have been persisted to disk
     /// and update session mappings to point to the discovered conversations.
     ///
     /// When a new conversation is started, it appears in `ephemeral_sessions` until
@@ -604,32 +615,34 @@ impl App {
     /// 1. Update `session_to_claude_id` to map daemon_id -> actual Claude session ID
     /// 2. Update `selected_conversation` if this is the active session
     /// 3. Remove the ephemeral entry to avoid duplicate sidebar entries
+    ///
+    /// The matching algorithm ensures correctness by:
+    /// - Only matching conversations created AFTER the ephemeral session was started
+    /// - Not matching conversations already claimed by another daemon session
     fn cleanup_persisted_ephemeral_sessions(&mut self) {
-        // Build a map: project_path -> most recent conversation for that project
-        let mut recent_by_project: HashMap<PathBuf, &Conversation> = HashMap::new();
-        for group in &self.groups {
-            for conv in group.conversations() {
-                let path = &conv.project_path;
-                if let Some(existing) = recent_by_project.get(path) {
-                    if conv.timestamp > existing.timestamp {
-                        recent_by_project.insert(path.clone(), conv);
-                    }
-                } else {
-                    recent_by_project.insert(path.clone(), conv);
-                }
-            }
-        }
+        // Build list of all conversations
+        let all_convs: Vec<&Conversation> = self
+            .groups
+            .iter()
+            .flat_map(|g| g.conversations())
+            .collect();
+
+        // Track which Claude session IDs are already claimed by a daemon
+        let claimed_ids: HashSet<String> = self
+            .session_to_claude_id
+            .values()
+            .filter_map(|v| v.clone())
+            .collect();
 
         // Collect ephemeral sessions to process (avoid borrow issues)
-        let ephemeral_to_process: Vec<(String, PathBuf)> = self
+        let ephemeral_to_process: Vec<(String, EphemeralSession)> = self
             .ephemeral_sessions
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        // For each ephemeral session, check if there's now a discovered conversation
-        // in the same project directory
-        for (daemon_id, project_path) in ephemeral_to_process {
+        // For each ephemeral session, find a matching conversation
+        for (daemon_id, ephemeral) in ephemeral_to_process {
             // Check if this ephemeral session's Claude ID is still None
             let needs_update = self
                 .session_to_claude_id
@@ -637,21 +650,33 @@ impl App {
                 .map(|opt| opt.is_none())
                 .unwrap_or(false);
 
-            if needs_update {
-                // Find the most recent conversation for this project path
-                if let Some(conv) = recent_by_project.get(&project_path) {
-                    // Update the daemon → Claude ID mapping
-                    self.session_to_claude_id
-                        .insert(daemon_id.clone(), Some(conv.session_id.clone()));
+            if !needs_update {
+                continue;
+            }
 
-                    // If this is the active session, update selected_conversation
-                    if self.active_session_id.as_ref() == Some(&daemon_id) {
-                        self.selected_conversation = Some((*conv).clone());
-                    }
+            // Find matching conversation:
+            // 1. Same project path
+            // 2. Created AFTER this ephemeral session was started
+            // 3. Not already claimed by another daemon session
+            let matching_conv = all_convs
+                .iter()
+                .filter(|c| c.project_path == ephemeral.project_path)
+                .filter(|c| c.timestamp > ephemeral.created_at)
+                .filter(|c| !claimed_ids.contains(&c.session_id))
+                .min_by_key(|c| c.timestamp); // Oldest matching = most likely match
 
-                    // Remove from ephemeral_sessions
-                    self.ephemeral_sessions.remove(&daemon_id);
+            if let Some(conv) = matching_conv {
+                // Update the daemon → Claude ID mapping
+                self.session_to_claude_id
+                    .insert(daemon_id.clone(), Some(conv.session_id.clone()));
+
+                // If this is the active session, update selected_conversation
+                if self.active_session_id.as_ref() == Some(&daemon_id) {
+                    self.selected_conversation = Some((*conv).clone());
                 }
+
+                // Remove from ephemeral_sessions
+                self.ephemeral_sessions.remove(&daemon_id);
             }
         }
     }

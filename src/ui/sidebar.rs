@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use ratatui::{
     buffer::Buffer,
@@ -9,6 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget},
 };
 
+use crate::app::EphemeralSession;
 use crate::claude::conversation::ConversationStatus;
 use crate::claude::grouping::ConversationGroup;
 
@@ -68,8 +68,8 @@ pub struct Sidebar<'a> {
     focused: bool,
     /// Session IDs that are currently running (have active PTYs)
     running_sessions: &'a std::collections::HashSet<String>,
-    /// Ephemeral sessions: temp session_id -> project path
-    ephemeral_sessions: &'a HashMap<String, PathBuf>,
+    /// Ephemeral sessions: temp session_id -> session info
+    ephemeral_sessions: &'a HashMap<String, EphemeralSession>,
     /// Whether to hide inactive (Idle) sessions
     hide_inactive: bool,
 }
@@ -79,7 +79,7 @@ impl<'a> Sidebar<'a> {
         groups: &'a [ConversationGroup],
         focused: bool,
         running_sessions: &'a std::collections::HashSet<String>,
-        ephemeral_sessions: &'a HashMap<String, PathBuf>,
+        ephemeral_sessions: &'a HashMap<String, EphemeralSession>,
         hide_inactive: bool,
     ) -> Self {
         Self {
@@ -143,7 +143,7 @@ fn build_list_items(
     show_all_projects: bool,
     expanded_conversations: &std::collections::HashSet<String>,
     running_sessions: &std::collections::HashSet<String>,
-    ephemeral_sessions: &HashMap<String, PathBuf>,
+    ephemeral_sessions: &HashMap<String, EphemeralSession>,
     hide_inactive: bool,
 ) -> Vec<ListItem<'static>> {
     let mut items = Vec::new();
@@ -172,8 +172,8 @@ fn build_list_items(
             // (ephemeral sessions are always shown - they're running by definition)
             let group_project_path = group.project_path();
             if let Some(project_path) = group_project_path {
-                for (session_id, path) in ephemeral_sessions {
-                    if path == &project_path {
+                for (session_id, ephemeral) in ephemeral_sessions {
+                    if ephemeral.project_path == project_path {
                         // Render ephemeral session with distinctive styling
                         items.push(ListItem::new(Line::from(vec![
                             Span::raw("  "),
@@ -289,7 +289,7 @@ pub fn build_sidebar_items(
     collapsed: &std::collections::HashSet<String>,
     show_all_projects: bool,
     expanded_conversations: &std::collections::HashSet<String>,
-    ephemeral_sessions: &HashMap<String, PathBuf>,
+    ephemeral_sessions: &HashMap<String, EphemeralSession>,
     running_sessions: &std::collections::HashSet<String>,
     hide_inactive: bool,
 ) -> Vec<SidebarItem> {
@@ -313,8 +313,8 @@ pub fn build_sidebar_items(
             // (ephemeral sessions are always shown - they're running by definition)
             let group_project_path = group.project_path();
             if let Some(project_path) = group_project_path {
-                for (session_id, path) in ephemeral_sessions {
-                    if path == &project_path {
+                for (session_id, ephemeral) in ephemeral_sessions {
+                    if ephemeral.project_path == project_path {
                         items.push(SidebarItem::EphemeralSession {
                             session_id: session_id.clone(),
                             group_key: group_key.clone(),
