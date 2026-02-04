@@ -11,13 +11,22 @@ use crate::claude::grouping::{
 use crate::claude::sessions::{parse_all_sessions, SessionEntry};
 use crate::claude::SessionsWatcher;
 use crate::session::{SessionManager, SessionState};
-use crate::ui::sidebar::{build_sidebar_items, SidebarItem, SidebarState};
+use crate::ui::modal::NewProjectModalState;
+use crate::ui::sidebar::{build_sidebar_items, group_has_active_content, SidebarItem, SidebarState};
 
 /// Clipboard status for feedback display
 #[derive(Debug, Clone)]
 pub enum ClipboardStatus {
     None,
     Copied { path: String, at: Instant },
+}
+
+/// Modal dialog state
+pub enum ModalState {
+    /// No modal is open
+    None,
+    /// New project modal is open
+    NewProject(NewProjectModalState),
 }
 
 /// Which pane is currently focused
@@ -37,6 +46,19 @@ pub enum ChordState {
     DeletePending { started_at: Instant },
     /// Count prefix accumulating (e.g., "4" waiting for j/k to move 4 lines)
     CountPending { count: u32, started_at: Instant },
+}
+
+/// Info about an active session found in a group
+#[derive(Debug, Clone)]
+pub enum ActiveSessionInfo {
+    /// An ephemeral session (new, not yet persisted)
+    Ephemeral { index: usize, session_id: String },
+    /// A persisted conversation
+    Conversation {
+        index: usize,
+        session_id: String,
+        conversation: Conversation,
+    },
 }
 
 /// Tracks an ephemeral session (new conversation not yet persisted to disk)
@@ -89,6 +111,10 @@ pub struct App {
     pub clipboard_status: ClipboardStatus,
     /// Ordered list of group keys to maintain stable group order during auto-refresh
     group_order: Vec<String>,
+    /// Dangerous mode: when true, new sessions are started with --dangerously-skip-permissions
+    pub dangerous_mode: bool,
+    /// Current modal state
+    pub modal_state: ModalState,
 }
 
 impl App {
@@ -121,6 +147,8 @@ impl App {
             chord_state: ChordState::None,
             clipboard_status: ClipboardStatus::None,
             group_order: Vec::new(),
+            dangerous_mode: false,
+            modal_state: ModalState::None,
         };
 
         app.load_conversations_full()?;
@@ -256,6 +284,290 @@ impl App {
             self.sidebar_state.list_state.select(Some(items.len() - 1));
             self.update_selected_conversation();
         }
+    }
+
+    /// Check if a group has active content (running session, ephemeral session, or non-idle conversation)
+    fn is_group_active(&self, group_key: &str) -> bool {
+        let running = self.running_session_ids();
+        for group in &self.groups {
+            if group.key() == group_key {
+                return group_has_active_content(group, &running, &self.ephemeral_sessions);
+            }
+        }
+        false
+    }
+
+    /// Find the active session within a group (ephemeral or running conversation)
+    ///
+    /// Priority:
+    /// 1. Ephemeral sessions (new conversations not yet persisted)
+    /// 2. Running conversations (have active PTYs)
+    /// 3. Active/WaitingForInput status conversations
+    ///
+    /// Returns the sidebar item index and session info if found.
+    fn find_active_session_in_group(&self, group_key: &str) -> Option<ActiveSessionInfo> {
+        let items = self.sidebar_items();
+        let running = self.running_session_ids();
+
+        // Find the group
+        let group = self.groups.iter().find(|g| g.key() == group_key)?;
+        let group_project_path = group.project_path();
+
+        // Priority 1: Check for ephemeral sessions
+        if let Some(project_path) = group_project_path {
+            for (session_id, ephemeral) in &self.ephemeral_sessions {
+                if ephemeral.project_path == project_path {
+                    // Find this ephemeral session's index in the sidebar items
+                    let index = items.iter().position(|item| {
+                        matches!(item, SidebarItem::EphemeralSession { session_id: sid, .. } if sid == session_id)
+                    });
+                    if let Some(idx) = index {
+                        return Some(ActiveSessionInfo::Ephemeral {
+                            index: idx,
+                            session_id: session_id.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Priority 2 & 3: Check conversations (running first, then active status)
+        let conversations = group.conversations();
+
+        // First pass: find running conversations (excluding plan implementations)
+        for (conv_idx, conv) in conversations.iter().enumerate() {
+            if conv.is_plan_implementation {
+                continue;
+            }
+            if running.contains(&conv.session_id) {
+                // Find this conversation's index in the sidebar items
+                let index = items.iter().position(|item| {
+                    matches!(item, SidebarItem::Conversation { group_key: gk, index } if gk == group_key && *index == conv_idx)
+                });
+                if let Some(idx) = index {
+                    return Some(ActiveSessionInfo::Conversation {
+                        index: idx,
+                        session_id: conv.session_id.clone(),
+                        conversation: conv.clone(),
+                    });
+                }
+            }
+        }
+
+        // Second pass: find conversations with Active or WaitingForInput status
+        for (conv_idx, conv) in conversations.iter().enumerate() {
+            if conv.is_plan_implementation {
+                continue;
+            }
+            if matches!(
+                conv.status,
+                ConversationStatus::Active | ConversationStatus::WaitingForInput
+            ) {
+                // Find this conversation's index in the sidebar items
+                let index = items.iter().position(|item| {
+                    matches!(item, SidebarItem::Conversation { group_key: gk, index } if gk == group_key && *index == conv_idx)
+                });
+                if let Some(idx) = index {
+                    return Some(ActiveSessionInfo::Conversation {
+                        index: idx,
+                        session_id: conv.session_id.clone(),
+                        conversation: conv.clone(),
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get the group key for the item at the given index
+    fn get_group_key_for_index(&self, items: &[SidebarItem], index: usize) -> Option<String> {
+        items.get(index).map(|item| match item {
+            SidebarItem::GroupHeader { key, .. } => key.clone(),
+            SidebarItem::Conversation { group_key, .. } => group_key.clone(),
+            SidebarItem::EphemeralSession { group_key, .. } => group_key.clone(),
+            SidebarItem::ShowMoreConversations { group_key, .. } => group_key.clone(),
+            SidebarItem::ShowMoreProjects { .. } => String::new(),
+        })
+    }
+
+    /// Cycle forward to the next active project's group header
+    /// Returns true if successfully moved to a different active project
+    pub fn cycle_next_active_project(&mut self) -> bool {
+        let items = self.sidebar_items();
+        if items.is_empty() {
+            return false;
+        }
+
+        // Build list of (index, group_key) for active group headers
+        let active_headers: Vec<(usize, String)> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                if let SidebarItem::GroupHeader { key, .. } = item {
+                    if self.is_group_active(key) {
+                        return Some((idx, key.clone()));
+                    }
+                }
+                None
+            })
+            .collect();
+
+        if active_headers.is_empty() {
+            return false;
+        }
+
+        let current = self.sidebar_state.list_state.selected().unwrap_or(0);
+        let current_group = self.get_group_key_for_index(&items, current);
+
+        // Find the next active header after current position (with wrap)
+        let next = active_headers
+            .iter()
+            .find(|(idx, key)| *idx > current && Some(key) != current_group.as_ref())
+            .or_else(|| {
+                // Wrap around - find first active header with different key
+                active_headers
+                    .iter()
+                    .find(|(_, key)| Some(key) != current_group.as_ref())
+            })
+            .or_else(|| {
+                // Only one active project - just go to its header
+                active_headers.first()
+            });
+
+        if let Some((idx, _)) = next {
+            self.sidebar_state.list_state.select(Some(*idx));
+            self.update_selected_conversation();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cycle backward to the previous active project's group header
+    /// Returns true if successfully moved to a different active project
+    pub fn cycle_prev_active_project(&mut self) -> bool {
+        let items = self.sidebar_items();
+        if items.is_empty() {
+            return false;
+        }
+
+        // Build list of (index, group_key) for active group headers
+        let active_headers: Vec<(usize, String)> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                if let SidebarItem::GroupHeader { key, .. } = item {
+                    if self.is_group_active(key) {
+                        return Some((idx, key.clone()));
+                    }
+                }
+                None
+            })
+            .collect();
+
+        if active_headers.is_empty() {
+            return false;
+        }
+
+        let current = self.sidebar_state.list_state.selected().unwrap_or(0);
+        let current_group = self.get_group_key_for_index(&items, current);
+
+        // Find the previous active header before current position (with wrap)
+        let prev = active_headers
+            .iter()
+            .rev()
+            .find(|(idx, key)| *idx < current && Some(key) != current_group.as_ref())
+            .or_else(|| {
+                // Wrap around - find last active header with different key
+                active_headers
+                    .iter()
+                    .rev()
+                    .find(|(_, key)| Some(key) != current_group.as_ref())
+            })
+            .or_else(|| {
+                // Only one active project - just go to its header
+                active_headers.last()
+            });
+
+        if let Some((idx, _)) = prev {
+            self.sidebar_state.list_state.select(Some(*idx));
+            self.update_selected_conversation();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cycle to next/previous active project AND switch to the active session within it.
+    ///
+    /// This method combines cycling and switching in one operation:
+    /// 1. Cycles to the next (forward=true) or previous (forward=false) active project
+    /// 2. Finds the active session within that project (ephemeral or running conversation)
+    /// 3. Switches to that session and focuses the terminal
+    ///
+    /// Returns Ok(true) if successfully switched, Ok(false) if no switch occurred.
+    pub fn cycle_and_switch_to_active(&mut self, forward: bool) -> Result<bool> {
+        // First, cycle to the target group
+        let cycled = if forward {
+            self.cycle_next_active_project()
+        } else {
+            self.cycle_prev_active_project()
+        };
+
+        if !cycled {
+            return Ok(false);
+        }
+
+        // Get the group key from the newly selected position
+        let items = self.sidebar_items();
+        let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
+        let group_key = match items.get(selected) {
+            Some(SidebarItem::GroupHeader { key, .. }) => key.clone(),
+            _ => return Ok(false),
+        };
+
+        // Find the active session in this group
+        if let Some(session_info) = self.find_active_session_in_group(&group_key) {
+            match session_info {
+                ActiveSessionInfo::Ephemeral { index, session_id } => {
+                    // Select the ephemeral session in sidebar
+                    self.sidebar_state.list_state.select(Some(index));
+                    // Switch to the already-running ephemeral session
+                    self.active_session_id = Some(session_id);
+                    self.selected_conversation = None;
+                    self.focus = Focus::Terminal;
+                }
+                ActiveSessionInfo::Conversation {
+                    index,
+                    session_id: claude_session_id,
+                    conversation,
+                } => {
+                    // Select the conversation in sidebar
+                    self.sidebar_state.list_state.select(Some(index));
+                    self.selected_conversation = Some(conversation.clone());
+
+                    // Check if we already have a daemon session for this conversation
+                    let existing_session = self
+                        .session_to_claude_id
+                        .iter()
+                        .find(|(_, v)| **v == Some(claude_session_id.clone()))
+                        .map(|(k, _)| k.clone());
+
+                    if let Some(daemon_session_id) = existing_session {
+                        // Switch to existing session
+                        self.active_session_id = Some(daemon_session_id);
+                    } else {
+                        // Start new session with --resume
+                        self.start_session(&conversation.project_path, Some(&claude_session_id))?;
+                    }
+                    self.focus = Focus::Terminal;
+                }
+            }
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     /// Navigate up by N items (clamping at top, no wrap)
@@ -441,6 +753,7 @@ impl App {
             claude_session_id,
             rows,
             cols,
+            self.dangerous_mode,
         )?;
 
         // Track the mapping from session ID to Claude session
@@ -893,6 +1206,11 @@ impl App {
         }
     }
 
+    /// Toggle dangerous mode on/off
+    pub fn toggle_dangerous_mode(&mut self) {
+        self.dangerous_mode = !self.dangerous_mode;
+    }
+
     /// Check if clipboard copy happened recently (for UI feedback)
     pub fn recent_clipboard_copy(&self, within_ms: u64) -> Option<&str> {
         match &self.clipboard_status {
@@ -906,6 +1224,34 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Open the new project modal dialog
+    pub fn open_new_project_modal(&mut self) {
+        self.modal_state = ModalState::NewProject(NewProjectModalState::new());
+    }
+
+    /// Close any open modal dialog
+    pub fn close_modal(&mut self) {
+        self.modal_state = ModalState::None;
+    }
+
+    /// Check if a modal is currently open
+    pub fn is_modal_open(&self) -> bool {
+        !matches!(self.modal_state, ModalState::None)
+    }
+
+    /// Confirm the new project modal selection and start a session
+    pub fn confirm_new_project(&mut self, path: PathBuf) -> Result<()> {
+        // Close the modal first
+        self.modal_state = ModalState::None;
+
+        // Start a new session in the selected directory
+        self.start_session(&path, None)?;
+        self.selected_conversation = None;
+        self.focus = Focus::Terminal;
+
+        Ok(())
     }
 }
 

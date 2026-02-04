@@ -25,8 +25,9 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use app::{App, ChordState, Focus};
+use app::{App, ChordState, Focus, ModalState};
 use ui::layout::create_layout_with_help;
+use ui::modal::NewProjectModal;
 use ui::sidebar::Sidebar;
 use ui::terminal_pane::TerminalPane;
 
@@ -179,6 +180,11 @@ fn handle_key_event(
         *hot_reload_status = HotReloadStatus::None;
     }
 
+    // Modal handling takes precedence over everything else
+    if app.is_modal_open() {
+        return handle_modal_key(app, key);
+    }
+
     // Global keybindings
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(KeyAction::Quit),
@@ -197,6 +203,15 @@ fn handle_key_event(
             app.set_focus(Focus::Terminal);
             return Ok(KeyAction::Continue);
         }
+        // Cycle between active projects (works from any pane)
+        (KeyCode::Char('.'), KeyModifiers::CONTROL) => {
+            let _ = app.cycle_and_switch_to_active(true);
+            return Ok(KeyAction::Continue);
+        }
+        (KeyCode::Char(','), KeyModifiers::CONTROL) => {
+            let _ = app.cycle_and_switch_to_active(false);
+            return Ok(KeyAction::Continue);
+        }
         _ => {}
     }
 
@@ -204,6 +219,30 @@ fn handle_key_event(
     match app.focus {
         Focus::Sidebar => handle_sidebar_key(app, key),
         Focus::Terminal => handle_terminal_key(app, key),
+    }
+}
+
+fn handle_modal_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    // Escape always closes the modal
+    if key.code == KeyCode::Esc {
+        app.close_modal();
+        return Ok(KeyAction::Continue);
+    }
+
+    // Handle modal-specific input
+    match &mut app.modal_state {
+        ModalState::None => {
+            // Shouldn't happen, but handle gracefully
+            Ok(KeyAction::Continue)
+        }
+        ModalState::NewProject(ref mut state) => {
+            // Handle key and check if a path was confirmed
+            if let Some(path) = state.handle_key(key) {
+                // Path was confirmed - start session
+                app.confirm_new_project(path)?;
+            }
+            Ok(KeyAction::Continue)
+        }
     }
 }
 
@@ -291,6 +330,22 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
         KeyCode::Esc => {
             // Cancel any pending chord
             app.chord_state = ChordState::None;
+        }
+        KeyCode::Char(']') => {
+            // Cycle forward to next active project and switch to active session
+            let _ = app.cycle_and_switch_to_active(true);
+        }
+        KeyCode::Char('[') => {
+            // Cycle backward to previous active project and switch to active session
+            let _ = app.cycle_and_switch_to_active(false);
+        }
+        KeyCode::Char('D') => {
+            // Toggle dangerous mode (skip permissions for new sessions)
+            app.toggle_dangerous_mode();
+        }
+        KeyCode::Char('n') => {
+            // Open new project modal
+            app.open_new_project_modal();
         }
         KeyCode::Enter => {
             app.open_selected()?;
@@ -463,9 +518,39 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
             f.render_widget(msg, help_area);
         }
     }
+
+    // Draw modal last (on top of everything) if one is open
+    draw_modal(f, app);
+}
+
+fn draw_modal(f: &mut Frame, app: &mut App) {
+    match &mut app.modal_state {
+        ModalState::None => {}
+        ModalState::NewProject(ref mut state) => {
+            let area = NewProjectModal::calculate_area(f.area());
+            let modal = NewProjectModal::new(state);
+            f.render_widget(modal, area);
+        }
+    }
 }
 
 fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
+    // Check for dangerous mode (highest priority warning)
+    if app.dangerous_mode {
+        let msg = Paragraph::new(Line::from(vec![
+            Span::styled(
+                " ⚠ DANGEROUS MODE ",
+                Style::default().fg(Color::Black).bg(Color::Red),
+            ),
+            Span::raw(" New sessions will skip permission prompts. Press "),
+            Span::styled("D", Style::default().fg(Color::Cyan)),
+            Span::raw(" to disable."),
+        ]))
+        .style(Style::default().bg(Color::DarkGray));
+        f.render_widget(msg, area);
+        return;
+    }
+
     // Check for pending chord sequence first (highest priority)
     if let Some(pending) = app.chord_state.pending_display() {
         let hint = match &app.chord_state {
@@ -523,6 +608,8 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
                 Span::raw("nav "),
                 Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
                 Span::raw("open "),
+                Span::styled(" n ", Style::default().fg(Color::Cyan)),
+                Span::raw("new "),
                 Span::styled(" dd ", Style::default().fg(Color::Cyan)),
                 Span::raw("close "),
                 Span::styled(" y ", Style::default().fg(Color::Cyan)),
@@ -539,10 +626,10 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             vec![
                 Span::styled(" C-h ", Style::default().fg(Color::Cyan)),
                 Span::raw("sidebar "),
+                Span::styled(" C-./C-, ", Style::default().fg(Color::Cyan)),
+                Span::raw("cycle "),
                 Span::styled(" PgUp/Dn ", Style::default().fg(Color::Cyan)),
                 Span::raw("scroll "),
-                Span::styled(" C-S-B ", Style::default().fg(Color::Cyan)),
-                Span::raw("build "),
                 Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
                 Span::raw("quit"),
             ]
