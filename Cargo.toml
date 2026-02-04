@@ -5,6 +5,11 @@ edition = "2021"
 description = "A TUI for browsing and managing Claude Code conversations"
 authors = ["Brandon"]
 license = "MIT"
+repository = "https://github.com/brs98/claudatui"
+homepage = "https://github.com/brs98/claudatui"
+readme = "README.md"
+keywords = ["tui", "claude", "ai", "terminal", "ratatui"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 ratatui = "0.29"
