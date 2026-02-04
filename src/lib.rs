@@ -5,6 +5,7 @@
 //! - Claude conversation parsing and grouping
 //! - Terminal UI components
 
+pub mod app;
 pub mod claude;
 pub mod event;
 pub mod pty;

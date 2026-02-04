@@ -1,9 +1,5 @@
-mod app;
-mod claude;
-mod event;
-mod pty;
-mod session;
-mod ui;
+use claudatui::app;
+use claudatui::ui;
 
 use std::ffi::CString;
 use std::io;
