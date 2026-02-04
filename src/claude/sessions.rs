@@ -218,7 +218,12 @@ fn truncate_prompt(text: &str) -> String {
     if text.len() <= MAX_LEN {
         text.to_string()
     } else {
-        format!("{}...", &text[..MAX_LEN])
+        // Find the last valid char boundary at or before MAX_LEN
+        let mut end = MAX_LEN;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &text[..end])
     }
 }
 
