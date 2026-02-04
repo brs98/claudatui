@@ -41,6 +41,8 @@ pub struct Conversation {
     /// Git branch (if in a git repo)
     #[allow(dead_code)]
     pub git_branch: Option<String>,
+    /// Whether this is a plan implementation conversation (hidden from sidebar)
+    pub is_plan_implementation: bool,
 }
 
 /// Message from a conversation JSONL file

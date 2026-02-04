@@ -238,6 +238,7 @@ mod tests {
             status: ConversationStatus::Idle,
             message_count: 1,
             git_branch: None,
+            is_plan_implementation: false,
         }
     }
 
@@ -324,5 +325,34 @@ mod tests {
 
         // Updated order should reflect new state
         assert_eq!(updated_order.len(), 3);
+    }
+
+    #[test]
+    fn test_plan_implementation_filtering() {
+        // Create a mix of regular and plan implementation conversations
+        let mut regular = make_conversation("/Users/brandon/personal/project-a", 100);
+        regular.display = "Regular conversation".to_string();
+
+        let mut plan_impl = make_conversation("/Users/brandon/personal/project-a", 200);
+        plan_impl.display = "Implement the following plan: ...".to_string();
+        plan_impl.is_plan_implementation = true;
+
+        let mut another_regular = make_conversation("/Users/brandon/personal/project-a", 300);
+        another_regular.display = "Another regular one".to_string();
+
+        let convs = vec![regular, plan_impl, another_regular];
+        let groups = group_conversations(convs);
+
+        assert_eq!(groups.len(), 1);
+        let conversations = groups[0].conversations();
+        assert_eq!(conversations.len(), 3); // All 3 are in the group
+
+        // But when we filter (simulating sidebar behavior):
+        let filtered: Vec<_> = conversations
+            .iter()
+            .filter(|c| !c.is_plan_implementation)
+            .collect();
+        assert_eq!(filtered.len(), 2); // Only 2 visible
+        assert!(!filtered.iter().any(|c| c.is_plan_implementation));
     }
 }

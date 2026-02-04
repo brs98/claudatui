@@ -35,6 +35,8 @@ pub enum ChordState {
     None,
     /// First 'd' pressed, waiting for second 'd' to close session
     DeletePending { started_at: Instant },
+    /// Count prefix accumulating (e.g., "4" waiting for j/k to move 4 lines)
+    CountPending { count: u32, started_at: Instant },
 }
 
 /// Tracks an ephemeral session (new conversation not yet persisted to disk)
@@ -150,16 +152,30 @@ impl App {
 
     /// Convert SessionEntry list to Conversation list
     fn sessions_to_conversations(&self, sessions: Vec<SessionEntry>) -> Vec<Conversation> {
+        let running = self.running_session_ids();
+
         sessions
             .into_iter()
             .map(|session| {
                 // Check conversation file for status using the full path
                 let conv_path = PathBuf::from(&session.full_path);
-                let status = if conv_path.exists() {
+                let mut status = if conv_path.exists() {
                     detect_status_fast(&conv_path).unwrap_or(ConversationStatus::Idle)
                 } else {
                     ConversationStatus::Idle
                 };
+
+                // Only show WaitingForInput if session is actually running
+                if status == ConversationStatus::WaitingForInput
+                    && !running.contains(&session.session_id)
+                {
+                    status = ConversationStatus::Idle;
+                }
+
+                // Detect plan implementation conversations by checking first_prompt
+                let is_plan_implementation = session
+                    .first_prompt
+                    .starts_with("Implement the following plan:");
 
                 Conversation {
                     session_id: session.session_id,
@@ -171,6 +187,7 @@ impl App {
                     status,
                     message_count: session.message_count,
                     git_branch: session.git_branch,
+                    is_plan_implementation,
                 }
             })
             .collect()
@@ -239,6 +256,33 @@ impl App {
             self.sidebar_state.list_state.select(Some(items.len() - 1));
             self.update_selected_conversation();
         }
+    }
+
+    /// Navigate up by N items (clamping at top, no wrap)
+    pub fn navigate_up_by(&mut self, count: usize) {
+        let items = self.sidebar_items();
+        if items.is_empty() {
+            return;
+        }
+
+        let current = self.sidebar_state.list_state.selected().unwrap_or(0);
+        let new_idx = current.saturating_sub(count);
+        self.sidebar_state.list_state.select(Some(new_idx));
+        self.update_selected_conversation();
+    }
+
+    /// Navigate down by N items (clamping at bottom, no wrap)
+    pub fn navigate_down_by(&mut self, count: usize) {
+        let items = self.sidebar_items();
+        if items.is_empty() {
+            return;
+        }
+
+        let current = self.sidebar_state.list_state.selected().unwrap_or(0);
+        let max_idx = items.len().saturating_sub(1);
+        let new_idx = (current + count).min(max_idx);
+        self.sidebar_state.list_state.select(Some(new_idx));
+        self.update_selected_conversation();
     }
 
     /// Toggle collapse state of current group
@@ -873,18 +917,20 @@ impl ChordState {
     pub fn is_expired(&self) -> bool {
         match self {
             ChordState::None => false,
-            ChordState::DeletePending { started_at } => {
+            ChordState::DeletePending { started_at }
+            | ChordState::CountPending { started_at, .. } => {
                 started_at.elapsed().as_millis() as u64 > CHORD_TIMEOUT_MS
             }
         }
     }
 
     /// Get display text for pending chord (for UI feedback)
-    /// Returns Some("d") when delete is pending, None otherwise
-    pub fn pending_display(&self) -> Option<&'static str> {
+    /// Returns the pending key sequence (e.g., "d" for delete, "4" for count)
+    pub fn pending_display(&self) -> Option<String> {
         match self {
             ChordState::None => None,
-            ChordState::DeletePending { .. } => Some("d"),
+            ChordState::DeletePending { .. } => Some("d".to_string()),
+            ChordState::CountPending { count, .. } => Some(count.to_string()),
         }
     }
 }

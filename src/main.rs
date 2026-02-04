@@ -209,23 +209,63 @@ fn handle_key_event(
 
 fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
     // Handle chord sequences first
-    if let ChordState::DeletePending { .. } = app.chord_state {
-        if key.code == KeyCode::Char('d') {
-            // Second 'd' pressed - close selected session
-            app.chord_state = ChordState::None;
-            app.close_selected_session();
-            return Ok(KeyAction::Continue);
-        } else {
-            // Any other key cancels the chord
-            app.chord_state = ChordState::None;
-            // Fall through to handle the key normally
+    match &app.chord_state {
+        ChordState::DeletePending { .. } => {
+            if key.code == KeyCode::Char('d') {
+                // Second 'd' pressed - close selected session
+                app.chord_state = ChordState::None;
+                app.close_selected_session();
+                return Ok(KeyAction::Continue);
+            } else {
+                // Any other key cancels the chord
+                app.chord_state = ChordState::None;
+                // Fall through to handle the key normally
+            }
         }
+        ChordState::CountPending { count, .. } => {
+            let count = *count;
+            match key.code {
+                // Accumulate digits (0-9)
+                KeyCode::Char(c @ '0'..='9') => {
+                    let digit = c.to_digit(10).unwrap();
+                    // Cap at 9999 to prevent overflow
+                    let new_count = (count * 10 + digit).min(9999);
+                    app.chord_state = ChordState::CountPending {
+                        count: new_count,
+                        started_at: std::time::Instant::now(),
+                    };
+                    return Ok(KeyAction::Continue);
+                }
+                // Execute motion with count
+                KeyCode::Char('j') | KeyCode::Down => {
+                    app.chord_state = ChordState::None;
+                    app.navigate_down_by(count as usize);
+                    return Ok(KeyAction::Continue);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    app.chord_state = ChordState::None;
+                    app.navigate_up_by(count as usize);
+                    return Ok(KeyAction::Continue);
+                }
+                // Escape cancels
+                KeyCode::Esc => {
+                    app.chord_state = ChordState::None;
+                    return Ok(KeyAction::Continue);
+                }
+                // Any other key cancels count and is processed normally
+                _ => {
+                    app.chord_state = ChordState::None;
+                    // Fall through to handle the key normally
+                }
+            }
+        }
+        ChordState::None => {}
     }
 
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => app.navigate_down(),
         KeyCode::Char('k') | KeyCode::Up => app.navigate_up(),
-        KeyCode::Char('g') => app.jump_to_first(),
+        KeyCode::Char('g') | KeyCode::Char('0') => app.jump_to_first(),
         KeyCode::Char('G') => app.jump_to_last(),
         KeyCode::Char(' ') => app.toggle_current_group(),
         KeyCode::Char('r') => app.manual_refresh()?,
@@ -239,6 +279,14 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
         KeyCode::Char('y') => {
             // Yank (copy) selected project path to clipboard
             app.copy_selected_path_to_clipboard();
+        }
+        // Start count chord sequence (digits 1-9)
+        KeyCode::Char(c @ '1'..='9') => {
+            let digit = c.to_digit(10).unwrap();
+            app.chord_state = ChordState::CountPending {
+                count: digit,
+                started_at: std::time::Instant::now(),
+            };
         }
         KeyCode::Esc => {
             // Cancel any pending chord
@@ -420,12 +468,18 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
 fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
     // Check for pending chord sequence first (highest priority)
     if let Some(pending) = app.chord_state.pending_display() {
+        let hint = match &app.chord_state {
+            ChordState::DeletePending { .. } => {
+                format!(" {} (press d again to delete, Esc to cancel)", pending)
+            }
+            ChordState::CountPending { .. } => {
+                format!(" {} (j/k to move, Esc to cancel)", pending)
+            }
+            ChordState::None => String::new(),
+        };
         let msg = Paragraph::new(Line::from(vec![
             Span::styled(" PENDING ", Style::default().fg(Color::Black).bg(Color::Yellow)),
-            Span::raw(format!(
-                " {} (press {} again to delete, Esc to cancel)",
-                pending, pending
-            )),
+            Span::raw(hint),
         ]))
         .style(Style::default().bg(Color::DarkGray));
         f.render_widget(msg, area);

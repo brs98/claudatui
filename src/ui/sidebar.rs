@@ -116,6 +116,7 @@ impl<'a> StatefulWidget for Sidebar<'a> {
         let inner_area = block.inner(area);
         block.render(area, buf);
 
+        let selected_index = state.list_state.selected();
         let items = build_list_items(
             self.groups,
             &state.collapsed_groups,
@@ -124,6 +125,7 @@ impl<'a> StatefulWidget for Sidebar<'a> {
             self.running_sessions,
             self.ephemeral_sessions,
             self.hide_inactive,
+            selected_index,
         );
         let list = List::new(items)
             .highlight_style(
@@ -145,8 +147,10 @@ fn build_list_items(
     running_sessions: &std::collections::HashSet<String>,
     ephemeral_sessions: &HashMap<String, EphemeralSession>,
     hide_inactive: bool,
+    selected_index: Option<usize>,
 ) -> Vec<ListItem<'static>> {
     let mut items = Vec::new();
+    let mut current_index: usize = 0;
 
     let visible_groups = if show_all_projects || groups.len() <= DEFAULT_VISIBLE_PROJECTS {
         groups
@@ -155,16 +159,24 @@ fn build_list_items(
     };
 
     for group in visible_groups {
+        // Skip groups with no active content when hide_inactive is enabled
+        if hide_inactive && !group_has_active_content(group, running_sessions, ephemeral_sessions) {
+            continue;
+        }
+
         let group_key = group.key();
         let is_collapsed = collapsed.contains(&group_key);
 
         // Group header with "+" indicator for new chat
         let arrow = if is_collapsed { "▸" } else { "▾" };
         let header = format!("{} {}", arrow, group.display_name());
+        let line_num = format_relative_line_number(current_index, selected_index);
         items.push(ListItem::new(Line::from(vec![
+            Span::styled(line_num, Style::default().fg(Color::DarkGray)),
             Span::styled(header, Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(" +", Style::default().fg(Color::Green)),
         ])));
+        current_index += 1;
 
         // Conversations and ephemeral sessions (if not collapsed)
         if !is_collapsed {
@@ -175,7 +187,9 @@ fn build_list_items(
                 for (session_id, ephemeral) in ephemeral_sessions {
                     if ephemeral.project_path == project_path {
                         // Render ephemeral session with distinctive styling
+                        let line_num = format_relative_line_number(current_index, selected_index);
                         items.push(ListItem::new(Line::from(vec![
+                            Span::styled(line_num, Style::default().fg(Color::DarkGray)),
                             Span::raw("  "),
                             Span::styled("● ", Style::default().fg(Color::Green)),
                             Span::styled(
@@ -183,28 +197,31 @@ fn build_list_items(
                                 Style::default().add_modifier(Modifier::ITALIC),
                             ),
                         ])));
+                        current_index += 1;
                     }
                 }
             }
 
-            // Get all conversations and filter if hide_inactive is enabled
+            // Get all conversations and filter out plan implementations
+            // Also filter inactive if hide_inactive is enabled
             let conversations = group.conversations();
-            let filtered_convos: Vec<_> = if hide_inactive {
-                conversations
-                    .iter()
-                    .filter(|conv| {
+            let filtered_convos: Vec<_> = conversations
+                .iter()
+                .filter(|conv| !conv.is_plan_implementation)
+                .filter(|conv| {
+                    if hide_inactive {
                         let is_running = running_sessions.contains(&conv.session_id);
                         is_running || !matches!(conv.status, ConversationStatus::Idle)
-                    })
-                    .collect()
-            } else {
-                conversations.iter().collect()
-            };
+                    } else {
+                        true
+                    }
+                })
+                .collect();
 
             // Determine how many conversations to show (from filtered list)
             let is_expanded = expanded_conversations.contains(&group_key);
             let visible_convos: Vec<_> = if is_expanded || filtered_convos.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
-                filtered_convos.iter().copied().collect()
+                filtered_convos.to_vec()
             } else {
                 filtered_convos.iter().take(DEFAULT_VISIBLE_CONVERSATIONS).copied().collect()
             };
@@ -231,37 +248,74 @@ fn build_list_items(
                 };
 
                 let display = truncate_string(&conv.display, 30);
+                let line_num = format_relative_line_number(current_index, selected_index);
                 items.push(ListItem::new(Line::from(vec![
+                    Span::styled(line_num, Style::default().fg(Color::DarkGray)),
                     Span::raw("  "),
                     status_indicator,
                     Span::raw(display),
                 ])));
+                current_index += 1;
             }
 
             // Add "show more conversations" if truncated (use filtered count)
             if !is_expanded && filtered_convos.len() > DEFAULT_VISIBLE_CONVERSATIONS {
                 let hidden = filtered_convos.len() - DEFAULT_VISIBLE_CONVERSATIONS;
+                let line_num = format_relative_line_number(current_index, selected_index);
                 items.push(ListItem::new(Line::from(vec![
+                    Span::styled(line_num, Style::default().fg(Color::DarkGray)),
                     Span::raw("  "),
                     Span::styled(
                         format!("↓ Show {} more...", hidden),
                         Style::default().fg(Color::Blue),
                     ),
                 ])));
+                current_index += 1;
             }
         }
     }
 
     // Add "Show more" at end if truncated
     if !show_all_projects && groups.len() > DEFAULT_VISIBLE_PROJECTS {
-        let hidden = groups.len() - DEFAULT_VISIBLE_PROJECTS;
-        items.push(ListItem::new(Line::from(vec![Span::styled(
-            format!("↓ Show {} more projects...", hidden),
-            Style::default().fg(Color::Blue),
-        )])));
+        // When hide_inactive is enabled, count only hidden groups with active content
+        let hidden_groups = &groups[DEFAULT_VISIBLE_PROJECTS..];
+        let hidden = if hide_inactive {
+            hidden_groups
+                .iter()
+                .filter(|g| group_has_active_content(g, running_sessions, ephemeral_sessions))
+                .count()
+        } else {
+            hidden_groups.len()
+        };
+        if hidden > 0 {
+            let line_num = format_relative_line_number(current_index, selected_index);
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(line_num, Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("↓ Show {} more projects...", hidden),
+                    Style::default().fg(Color::Blue),
+                ),
+            ])));
+        }
     }
 
     items
+}
+
+/// Format a relative line number for display
+/// Returns "0 " for selected item, or distance from selection (e.g., "1 ", "2 ")
+fn format_relative_line_number(index: usize, selected: Option<usize>) -> String {
+    match selected {
+        Some(sel) => {
+            let distance = if index >= sel {
+                index - sel
+            } else {
+                sel - index
+            };
+            format!("{:2} ", distance)
+        }
+        None => "   ".to_string(),
+    }
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
@@ -270,6 +324,35 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &s[..max_len.saturating_sub(3)])
     }
+}
+
+/// Check if a group has any active content (for hide_inactive filtering)
+fn group_has_active_content(
+    group: &ConversationGroup,
+    running_sessions: &std::collections::HashSet<String>,
+    ephemeral_sessions: &HashMap<String, EphemeralSession>,
+) -> bool {
+    // Check for ephemeral sessions in this group
+    if let Some(project_path) = group.project_path() {
+        for ephemeral in ephemeral_sessions.values() {
+            if ephemeral.project_path == project_path {
+                return true;
+            }
+        }
+    }
+
+    // Check for active/running conversations (excluding plan implementations)
+    for conv in group.conversations() {
+        if conv.is_plan_implementation {
+            continue;
+        }
+        let is_running = running_sessions.contains(&conv.session_id);
+        if is_running || !matches!(conv.status, ConversationStatus::Idle) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Represents an item in the flattened sidebar list
@@ -302,6 +385,11 @@ pub fn build_sidebar_items(
     };
 
     for group in visible_groups {
+        // Skip groups with no active content when hide_inactive is enabled
+        if hide_inactive && !group_has_active_content(group, running_sessions, ephemeral_sessions) {
+            continue;
+        }
+
         let group_key = group.key();
         items.push(SidebarItem::GroupHeader {
             key: group_key.clone(),
@@ -323,22 +411,24 @@ pub fn build_sidebar_items(
                 }
             }
 
-            // Get all conversations and filter if hide_inactive is enabled
+            // Get all conversations and filter out plan implementations
+            // Also filter inactive if hide_inactive is enabled
             // We keep track of original indices so lookup in app.rs still works
             let conversations = group.conversations();
-            let filtered_indices: Vec<usize> = if hide_inactive {
-                conversations
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, conv)| {
+            let filtered_indices: Vec<usize> = conversations
+                .iter()
+                .enumerate()
+                .filter(|(_, conv)| !conv.is_plan_implementation)
+                .filter(|(_, conv)| {
+                    if hide_inactive {
                         let is_running = running_sessions.contains(&conv.session_id);
                         is_running || !matches!(conv.status, ConversationStatus::Idle)
-                    })
-                    .map(|(idx, _)| idx)
-                    .collect()
-            } else {
-                (0..conversations.len()).collect()
-            };
+                    } else {
+                        true
+                    }
+                })
+                .map(|(idx, _)| idx)
+                .collect();
 
             // Determine how many conversations to show (from filtered list)
             let is_expanded = expanded_conversations.contains(&group_key);
@@ -368,9 +458,19 @@ pub fn build_sidebar_items(
 
     // Add "Show more" item if there are hidden projects
     if !show_all_projects && groups.len() > DEFAULT_VISIBLE_PROJECTS {
-        items.push(SidebarItem::ShowMoreProjects {
-            hidden_count: groups.len() - DEFAULT_VISIBLE_PROJECTS,
-        });
+        // When hide_inactive is enabled, count only hidden groups with active content
+        let hidden_groups = &groups[DEFAULT_VISIBLE_PROJECTS..];
+        let hidden_count = if hide_inactive {
+            hidden_groups
+                .iter()
+                .filter(|g| group_has_active_content(g, running_sessions, ephemeral_sessions))
+                .count()
+        } else {
+            hidden_groups.len()
+        };
+        if hidden_count > 0 {
+            items.push(SidebarItem::ShowMoreProjects { hidden_count });
+        }
     }
 
     items
