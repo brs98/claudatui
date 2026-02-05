@@ -25,11 +25,15 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use app::{App, ChordState, Focus, ModalState};
-use ui::layout::create_layout_with_help;
-use ui::modal::NewProjectModal;
+use claudatui::input::InputMode;
+use claudatui::input::which_key::{LeaderAction, LeaderKeyResult};
+use app::{App, ChordState, EscapeSequenceState, Focus, ModalState, TerminalPaneId};
+use ui::layout::create_layout_with_help_config;
+use ui::modal::{NewProjectModal, SearchKeyResult, SearchModal};
 use ui::sidebar::Sidebar;
 use ui::terminal_pane::TerminalPane;
+use ui::toast_widget::{ToastPosition, ToastWidget};
+use ui::WhichKeyWidget;
 
 /// Hot reload status for display
 enum HotReloadStatus {
@@ -105,6 +109,14 @@ fn run_app(
         // Check if chord has timed out
         app.check_chord_timeout();
 
+        // Check if leader mode has timed out
+        app.check_leader_timeout();
+
+        // Check if escape sequence has timed out and flush buffered key
+        if let Some(expired_key) = app.check_escape_seq_timeout() {
+            flush_buffered_key(app, expired_key)?;
+        }
+
         // Process all PTY output (direct, no daemon)
         app.session_manager.process_all_output();
 
@@ -116,6 +128,9 @@ fn run_app(
 
         // Check for sessions-index.json changes and reload if needed
         app.check_sessions_updates();
+
+        // Update toast manager (remove expired)
+        app.toast_manager.update();
 
         // Draw UI
         terminal.draw(|f| draw_ui(f, app, &hot_reload_status))?;
@@ -179,12 +194,23 @@ fn handle_key_event(
         *hot_reload_status = HotReloadStatus::None;
     }
 
-    // Modal handling takes precedence over everything else
-    if app.is_modal_open() {
-        return handle_modal_key(app, key);
+    // 1. Insert mode - handle modal or terminal passthrough with jk/kj escape detection
+    if matches!(app.input_mode, InputMode::Insert) {
+        if app.is_modal_open() {
+            return handle_modal_insert_with_escape_seq(app, key);
+        } else if matches!(app.focus, Focus::Terminal(_)) {
+            return handle_terminal_insert_with_escape_seq(app, key);
+        }
+        // Fallback: if in insert mode but not in modal or terminal, exit insert mode
+        app.exit_insert_mode();
     }
 
-    // Global keybindings
+    // 2. Leader mode (works in both sidebar and terminal focus)
+    if let InputMode::Leader(ref _state) = app.input_mode {
+        return handle_leader_key(app, key);
+    }
+
+    // 3. Global keybindings (Ctrl+Q, etc.)
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(KeyAction::Quit),
         (KeyCode::Char('q'), KeyModifiers::NONE) if app.focus == Focus::Sidebar => {
@@ -199,7 +225,7 @@ fn handle_key_event(
             return Ok(KeyAction::Continue);
         }
         (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
-            app.set_focus(Focus::Terminal);
+            app.set_focus(Focus::Terminal(TerminalPaneId::Primary));
             return Ok(KeyAction::Continue);
         }
         // Cycle between active projects (works from any pane)
@@ -211,41 +237,389 @@ fn handle_key_event(
             let _ = app.cycle_and_switch_to_active(false);
             return Ok(KeyAction::Continue);
         }
+        // Layout keybindings
+        (KeyCode::Char('>'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        | (KeyCode::Char('.'), KeyModifiers::CONTROL) => {
+            // Increase sidebar width
+            app.resize_sidebar(5);
+            return Ok(KeyAction::Continue);
+        }
+        (KeyCode::Char('<'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        | (KeyCode::Char(','), KeyModifiers::CONTROL) => {
+            // Decrease sidebar width
+            app.resize_sidebar(-5);
+            return Ok(KeyAction::Continue);
+        }
+        (KeyCode::Char('|'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        | (KeyCode::Char('\\'), KeyModifiers::ALT) => {
+            // Toggle sidebar position (left/right)
+            // Use Ctrl+Shift+\ or Alt+\ to avoid conflict with SIGQUIT
+            app.toggle_sidebar_position();
+            return Ok(KeyAction::Continue);
+        }
+        (KeyCode::Char('b'), KeyModifiers::ALT) => {
+            // Toggle sidebar minimized (Alt+B to avoid conflict with Ctrl+B in terminals)
+            app.toggle_sidebar_minimized();
+            return Ok(KeyAction::Continue);
+        }
         _ => {}
     }
 
-    // Focus-specific keybindings
+    // 4. Normal mode - focus-specific keybindings
     match app.focus {
-        Focus::Sidebar => handle_sidebar_key(app, key),
-        Focus::Terminal => handle_terminal_key(app, key),
+        Focus::Sidebar => handle_sidebar_key_normal(app, key),
+        Focus::Terminal(_) => handle_terminal_key_normal(app, key),
     }
 }
 
-fn handle_modal_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
-    // Escape always closes the modal
+/// Handle key input in leader mode (works in both sidebar and terminal)
+fn handle_leader_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    // Escape or Space cancels leader mode
+    if key.code == KeyCode::Esc || key.code == KeyCode::Char(' ') {
+        app.exit_leader_mode();
+        return Ok(KeyAction::Continue);
+    }
+
+    // Get the key character
+    let c = match key.code {
+        KeyCode::Char(c) => c,
+        _ => {
+            // Non-character keys cancel leader mode
+            app.exit_leader_mode();
+            return Ok(KeyAction::Continue);
+        }
+    };
+
+    // Get the current path from leader state
+    let path = if let InputMode::Leader(ref state) = app.input_mode {
+        state.path.clone()
+    } else {
+        // Shouldn't happen, but handle gracefully
+        return Ok(KeyAction::Continue);
+    };
+
+    // Process the key through the which-key config
+    match app.which_key_config.process_key(&path, c) {
+        LeaderKeyResult::Execute(action) => {
+            app.exit_leader_mode();
+            execute_leader_action(app, action)?;
+        }
+        LeaderKeyResult::Submenu => {
+            // Navigate into submenu by adding key to path
+            if let InputMode::Leader(ref mut state) = app.input_mode {
+                state.push(c);
+            }
+        }
+        LeaderKeyResult::Cancel => {
+            // Invalid key - cancel leader mode
+            app.exit_leader_mode();
+        }
+    }
+
+    Ok(KeyAction::Continue)
+}
+
+/// Execute a leader action
+fn execute_leader_action(app: &mut App, action: LeaderAction) -> Result<()> {
+    match action {
+        LeaderAction::BookmarkJump(slot) => {
+            app.jump_to_bookmark(slot)?;
+        }
+        LeaderAction::BookmarkSet(slot) => {
+            app.bookmark_current(slot)?;
+        }
+        LeaderAction::BookmarkDelete(slot) => {
+            app.remove_bookmark(slot)?;
+        }
+        LeaderAction::SearchOpen => {
+            app.open_search_modal();
+        }
+        LeaderAction::NewProject => {
+            app.open_new_project_modal();
+        }
+        LeaderAction::CloseSession => {
+            app.close_selected_session();
+        }
+        LeaderAction::Archive => {
+            app.archive_selected_conversation()?;
+        }
+        LeaderAction::Unarchive => {
+            app.unarchive_selected_conversation()?;
+        }
+        LeaderAction::CycleArchiveFilter => {
+            app.cycle_archive_filter();
+        }
+        LeaderAction::Refresh => {
+            app.manual_refresh()?;
+        }
+        LeaderAction::YankPath => {
+            app.copy_selected_path_to_clipboard();
+        }
+        LeaderAction::ToggleInactive => {
+            app.sidebar_state.toggle_hide_inactive();
+        }
+        LeaderAction::ToggleDangerous => {
+            app.toggle_dangerous_mode();
+        }
+        LeaderAction::AddConversation => {
+            // Open selected group and start new conversation
+            app.open_selected()?;
+        }
+    }
+    Ok(())
+}
+
+/// Result of processing a key through the jk/kj escape sequence state machine
+enum EscapeSeqResult {
+    /// Key was buffered as first of potential escape sequence — do nothing yet
+    Buffered,
+    /// jk or kj detected — exit insert mode
+    Escaped,
+    /// Previous buffered key expired by a new j/k — flush old key, new key is now buffered
+    FlushBuffered(KeyEvent),
+    /// Previous buffered key invalidated by non-j/k — flush old key, process new key normally
+    FlushAndProcess(KeyEvent, KeyEvent),
+    /// Not a trigger key (not j or k) and no pending state — pass through directly
+    PassThrough,
+}
+
+/// Process a key through the jk/kj escape sequence state machine.
+///
+/// Only `j` and `k` with no modifiers are trigger keys.
+/// When a trigger key is pressed:
+/// - If no pending state: buffer it (Buffered)
+/// - If pending with the complementary key: escape detected (Escaped)
+/// - If pending with the same key (jj/kk): flush old, buffer new (FlushBuffered)
+/// When a non-trigger key is pressed:
+/// - If pending: flush buffered + process current (FlushAndProcess)
+/// - If no pending: pass through directly (PassThrough)
+fn try_escape_sequence(app: &mut App, key: KeyEvent) -> EscapeSeqResult {
+    let is_trigger = matches!(key.code, KeyCode::Char('j') | KeyCode::Char('k'))
+        && key.modifiers == KeyModifiers::NONE;
+
+    let trigger_char = match key.code {
+        KeyCode::Char(c @ ('j' | 'k')) if key.modifiers == KeyModifiers::NONE => Some(c),
+        _ => None,
+    };
+
+    match std::mem::replace(&mut app.escape_seq_state, EscapeSequenceState::None) {
+        EscapeSequenceState::None => {
+            if let Some(c) = trigger_char {
+                // Buffer this key as potential first of escape sequence
+                app.escape_seq_state = EscapeSequenceState::Pending {
+                    first_key: c,
+                    first_key_event: key,
+                    started_at: std::time::Instant::now(),
+                };
+                EscapeSeqResult::Buffered
+            } else {
+                EscapeSeqResult::PassThrough
+            }
+        }
+        EscapeSequenceState::Pending {
+            first_key,
+            first_key_event,
+            started_at,
+        } => {
+            let elapsed = started_at.elapsed().as_millis() as u64;
+
+            if elapsed > app::ESCAPE_SEQ_TIMEOUT_MS {
+                // Timed out — flush old key, process new key from scratch
+                if is_trigger {
+                    // New trigger key: buffer it as new pending
+                    app.escape_seq_state = EscapeSequenceState::Pending {
+                        first_key: trigger_char.unwrap(),
+                        first_key_event: key,
+                        started_at: std::time::Instant::now(),
+                    };
+                    EscapeSeqResult::FlushBuffered(first_key_event)
+                } else {
+                    EscapeSeqResult::FlushAndProcess(first_key_event, key)
+                }
+            } else if let Some(c) = trigger_char {
+                if c != first_key {
+                    // Complementary key (j→k or k→j) within timeout — escape!
+                    EscapeSeqResult::Escaped
+                } else {
+                    // Same key (jj or kk) — flush old, buffer new
+                    app.escape_seq_state = EscapeSequenceState::Pending {
+                        first_key: c,
+                        first_key_event: key,
+                        started_at: std::time::Instant::now(),
+                    };
+                    EscapeSeqResult::FlushBuffered(first_key_event)
+                }
+            } else {
+                // Non-trigger key while pending — flush old, process new normally
+                EscapeSeqResult::FlushAndProcess(first_key_event, key)
+            }
+        }
+    }
+}
+
+/// Handle terminal insert mode with jk/kj escape sequence detection
+fn handle_terminal_insert_with_escape_seq(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    match try_escape_sequence(app, key) {
+        EscapeSeqResult::Buffered => {
+            // Key buffered, waiting for second key or timeout
+        }
+        EscapeSeqResult::Escaped => {
+            app.exit_insert_mode();
+            app.set_focus(Focus::Sidebar);
+        }
+        EscapeSeqResult::FlushBuffered(buffered) => {
+            // Send the old buffered key to PTY
+            let bytes = key_to_bytes(buffered);
+            if !bytes.is_empty() {
+                app.write_to_pty(&bytes)?;
+            }
+        }
+        EscapeSeqResult::FlushAndProcess(buffered, current) => {
+            // Send the old buffered key, then process the current key normally
+            let bytes = key_to_bytes(buffered);
+            if !bytes.is_empty() {
+                app.write_to_pty(&bytes)?;
+            }
+            let bytes = key_to_bytes(current);
+            if !bytes.is_empty() {
+                app.write_to_pty(&bytes)?;
+            }
+        }
+        EscapeSeqResult::PassThrough => {
+            // Not a trigger key — pass directly to PTY
+            let bytes = key_to_bytes(key);
+            if !bytes.is_empty() {
+                app.write_to_pty(&bytes)?;
+            }
+        }
+    }
+    Ok(KeyAction::Continue)
+}
+
+/// Handle modal insert mode with jk/kj escape sequence detection
+fn handle_modal_insert_with_escape_seq(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    // Escape always closes the modal (keep this fast path)
     if key.code == KeyCode::Esc {
         app.close_modal();
         return Ok(KeyAction::Continue);
     }
 
-    // Handle modal-specific input
-    match &mut app.modal_state {
-        ModalState::None => {
-            // Shouldn't happen, but handle gracefully
-            Ok(KeyAction::Continue)
+    match try_escape_sequence(app, key) {
+        EscapeSeqResult::Buffered => {
+            // Key buffered, waiting for second key or timeout
         }
-        ModalState::NewProject(ref mut state) => {
-            // Handle key and check if a path was confirmed
-            if let Some(path) = state.handle_key(key) {
-                // Path was confirmed - start session
-                app.confirm_new_project(path)?;
-            }
-            Ok(KeyAction::Continue)
+        EscapeSeqResult::Escaped => {
+            // Close modal and exit insert mode
+            app.close_modal();
+        }
+        EscapeSeqResult::FlushBuffered(buffered) => {
+            // Send old buffered key to modal
+            forward_key_to_modal(app, buffered)?;
+        }
+        EscapeSeqResult::FlushAndProcess(buffered, current) => {
+            // Send old buffered key, then current key to modal
+            forward_key_to_modal(app, buffered)?;
+            forward_key_to_modal(app, current)?;
+        }
+        EscapeSeqResult::PassThrough => {
+            // Not a trigger key — send directly to modal
+            forward_key_to_modal(app, key)?;
         }
     }
+    Ok(KeyAction::Continue)
 }
 
-fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+/// Forward a key event to the currently open modal
+fn forward_key_to_modal(app: &mut App, key: KeyEvent) -> Result<()> {
+    match &mut app.modal_state {
+        ModalState::None => {}
+        ModalState::NewProject(ref mut state) => {
+            if let Some(path) = state.handle_key(key) {
+                app.confirm_new_project(path)?;
+            }
+        }
+        ModalState::Search(ref mut state) => {
+            match state.handle_key(key) {
+                SearchKeyResult::Continue => {}
+                SearchKeyResult::QueryChanged => {
+                    app.perform_search();
+                }
+                SearchKeyResult::Selected(session_id) => {
+                    app.navigate_to_conversation(&session_id)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Flush a buffered escape sequence key to the appropriate target (PTY or modal)
+fn flush_buffered_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if matches!(app.input_mode, InputMode::Insert) {
+        if app.is_modal_open() {
+            forward_key_to_modal(app, key)?;
+        } else if matches!(app.focus, Focus::Terminal(_)) {
+            let bytes = key_to_bytes(key);
+            if !bytes.is_empty() {
+                app.write_to_pty(&bytes)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Handle terminal input in Normal mode (navigation, scroll, leader access)
+fn handle_terminal_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    let page_size = app.get_page_size();
+    let is_scroll_locked = app.is_scroll_locked();
+
+    match (key.code, key.modifiers) {
+        // Navigation
+        (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+            app.scroll_down(1);
+        }
+        (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+            app.scroll_up(1);
+        }
+        (KeyCode::Char('G'), KeyModifiers::SHIFT) => {
+            app.scroll_to_bottom();
+        }
+        (KeyCode::Char('g'), KeyModifiers::NONE) => {
+            // Scroll to top (like vim gg, but single g for simplicity)
+            if let Some(ref session_id) = app.active_session_id.clone() {
+                if let Some(session) = app.session_manager.get_session_mut(session_id) {
+                    session.scroll_to_top();
+                }
+            }
+        }
+        (KeyCode::PageUp, _) => {
+            app.scroll_up(page_size);
+        }
+        (KeyCode::PageDown, _) => {
+            app.scroll_down(page_size);
+        }
+        // Escape returns to bottom if scroll locked
+        (KeyCode::Esc, _) if is_scroll_locked => {
+            app.scroll_to_bottom();
+        }
+        // Leader key - full access to all commands
+        (KeyCode::Char(' '), KeyModifiers::NONE) => {
+            app.enter_leader_mode();
+        }
+        // Focus switching
+        (KeyCode::Char('h'), KeyModifiers::NONE) => {
+            app.set_focus(Focus::Sidebar);
+        }
+        // 'i' enters insert mode (like vim)
+        (KeyCode::Char('i'), KeyModifiers::NONE) => {
+            app.enter_insert_mode();
+        }
+        _ => {}
+    }
+    Ok(KeyAction::Continue)
+}
+
+fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
     // Handle chord sequences first
     match &app.chord_state {
         ChordState::DeletePending { .. } => {
@@ -297,28 +671,23 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
                 }
             }
         }
+        // BookmarkPending and RemoveBookmarkPending are no longer used
+        // (bookmarks are now accessed via leader key menu)
+        ChordState::BookmarkPending { .. } | ChordState::RemoveBookmarkPending { .. } => {
+            app.chord_state = ChordState::None;
+            // Fall through to handle key normally
+        }
         ChordState::None => {}
     }
 
     match key.code {
+        // Navigation
         KeyCode::Char('j') | KeyCode::Down => app.navigate_down(),
         KeyCode::Char('k') | KeyCode::Up => app.navigate_up(),
-        KeyCode::Char('g') | KeyCode::Char('0') => app.jump_to_first(),
+        KeyCode::Char('g') => app.jump_to_first(),
         KeyCode::Char('G') => app.jump_to_last(),
-        KeyCode::Char(' ') => app.toggle_current_group(),
-        KeyCode::Char('r') => app.manual_refresh()?,
-        KeyCode::Char('a') => app.sidebar_state.toggle_hide_inactive(),
-        KeyCode::Char('d') => {
-            // Start delete chord sequence
-            app.chord_state = ChordState::DeletePending {
-                started_at: std::time::Instant::now(),
-            };
-        }
-        KeyCode::Char('y') => {
-            // Yank (copy) selected project path to clipboard
-            app.copy_selected_path_to_clipboard();
-        }
-        // Start count chord sequence (digits 1-9)
+
+        // Numbers 1-9 start count prefix (for 5j, 10k style navigation)
         KeyCode::Char(c @ '1'..='9') => {
             let digit = c.to_digit(10).unwrap();
             app.chord_state = ChordState::CountPending {
@@ -326,70 +695,90 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
                 started_at: std::time::Instant::now(),
             };
         }
+
+        // Space enters leader mode (which-key menu)
+        KeyCode::Char(' ') => {
+            app.enter_leader_mode();
+        }
+
+        // Enter is context-aware: toggle group on header, open conversation otherwise
+        KeyCode::Enter => {
+            handle_sidebar_enter(app)?;
+        }
+
+        // 'a' adds new conversation in selected group (opens the group)
+        KeyCode::Char('a') => {
+            app.open_selected()?;
+        }
+
+        // 'i' toggles hide inactive (was 'a')
+        KeyCode::Char('i') => {
+            app.sidebar_state.toggle_hide_inactive();
+        }
+
+        // Direct actions (kept for convenience, also available via leader)
+        KeyCode::Char('r') => app.manual_refresh()?,
+        KeyCode::Char('y') => app.copy_selected_path_to_clipboard(),
+        KeyCode::Char('d') => {
+            // Start delete chord sequence
+            app.chord_state = ChordState::DeletePending {
+                started_at: std::time::Instant::now(),
+            };
+        }
+
         KeyCode::Esc => {
             // Cancel any pending chord
             app.chord_state = ChordState::None;
         }
+
+        // Project cycling
         KeyCode::Char(']') => {
-            // Cycle forward to next active project and switch to active session
             let _ = app.cycle_and_switch_to_active(true);
         }
         KeyCode::Char('[') => {
-            // Cycle backward to previous active project and switch to active session
             let _ = app.cycle_and_switch_to_active(false);
         }
-        KeyCode::Char('D') => {
-            // Toggle dangerous mode (skip permissions for new sessions)
-            app.toggle_dangerous_mode();
+
+        // Quick access actions (also available via leader)
+        KeyCode::Char('D') => app.toggle_dangerous_mode(),
+        KeyCode::Char('n') => app.open_new_project_modal(),
+        KeyCode::Char('/') => app.open_search_modal(),
+        KeyCode::Char('A') => app.cycle_archive_filter(),
+        KeyCode::Char('x') => {
+            let _ = app.archive_selected_conversation();
         }
-        KeyCode::Char('n') => {
-            // Open new project modal
-            app.open_new_project_modal();
+        KeyCode::Char('u') => {
+            let _ = app.unarchive_selected_conversation();
         }
-        KeyCode::Enter => {
-            app.open_selected()?;
-        }
+
         _ => {}
     }
     Ok(KeyAction::Continue)
 }
 
-fn handle_terminal_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
-    // Get page size from session state, or use default
-    let page_size = app.get_page_size();
-    let is_scroll_locked = app.is_scroll_locked();
+/// Handle Enter key in sidebar - context-aware behavior
+fn handle_sidebar_enter(app: &mut App) -> Result<()> {
+    use claudatui::ui::sidebar::SidebarItem;
 
-    match (key.code, key.modifiers) {
-        (KeyCode::PageUp, _) => {
-            app.scroll_up(page_size);
-            return Ok(KeyAction::Continue);
-        }
-        (KeyCode::PageDown, _) => {
-            app.scroll_down(page_size);
-            return Ok(KeyAction::Continue);
-        }
-        (KeyCode::Char('G'), KeyModifiers::SHIFT) if is_scroll_locked => {
-            app.scroll_to_bottom();
-            return Ok(KeyAction::Continue);
-        }
-        (KeyCode::Esc, _) if is_scroll_locked => {
-            app.scroll_to_bottom();
-            return Ok(KeyAction::Continue);
-        }
-        _ => {}
-    }
+    let items = app.sidebar_items();
+    let selected = app.sidebar_state.list_state.selected().unwrap_or(0);
 
-    // Convert key event to bytes and send to PTY
-    let bytes = key_to_bytes(key);
-    if !bytes.is_empty() {
-        app.write_to_pty(&bytes)?;
+    match items.get(selected) {
+        Some(SidebarItem::GroupHeader { .. }) => {
+            // Toggle expand/collapse on group headers
+            app.toggle_current_group();
+        }
+        _ => {
+            // Open conversation/ephemeral session, or handle other items
+            app.open_selected()?;
+        }
     }
-    Ok(KeyAction::Continue)
+    Ok(())
 }
 
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
     // Only handle mouse scroll when terminal is focused
-    if app.focus != Focus::Terminal {
+    if !matches!(app.focus, Focus::Terminal(_)) {
         return;
     }
 
@@ -477,7 +866,7 @@ fn perform_hot_reload() -> Result<String> {
 }
 
 fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
-    let (sidebar_area, terminal_area, help_area) = create_layout_with_help(f.area());
+    let (sidebar_area, terminal_area, help_area) = create_layout_with_help_config(f.area(), &app.config.layout);
 
     // Collect running session IDs for sidebar display
     let running_sessions = app.running_session_ids();
@@ -489,12 +878,14 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
         &running_sessions,
         &app.ephemeral_sessions,
         app.sidebar_state.hide_inactive,
+        app.sidebar_state.archive_filter,
+        &app.bookmark_manager,
     );
     f.render_stateful_widget(sidebar, sidebar_area, &mut app.sidebar_state);
 
     // Draw terminal pane with session state from daemon
     let session_state = app.get_session_state();
-    let terminal_pane = TerminalPane::new(session_state, app.focus == Focus::Terminal);
+    let terminal_pane = TerminalPane::new(session_state, matches!(app.focus, Focus::Terminal(_)));
     f.render_widget(terminal_pane, terminal_area);
 
     // Draw help bar or hot reload status
@@ -524,7 +915,22 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
         }
     }
 
-    // Draw modal last (on top of everything) if one is open
+    // Draw toasts (overlay on top of everything except modals)
+    let toasts: Vec<_> = app.toast_manager.visible_toasts();
+    if !toasts.is_empty() {
+        ToastWidget::new(&toasts)
+            .position(ToastPosition::BottomRight)
+            .render(f, f.area());
+    }
+
+    // Draw which-key popup when in Leader mode
+    if let InputMode::Leader(ref state) = app.input_mode {
+        let which_key_area = WhichKeyWidget::calculate_area(f.area());
+        let which_key = WhichKeyWidget::new(&app.which_key_config, &state.path);
+        f.render_widget(which_key, which_key_area);
+    }
+
+    // Draw modal last (highest z-index)
     draw_modal(f, app);
 }
 
@@ -534,6 +940,11 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
         ModalState::NewProject(ref mut state) => {
             let area = NewProjectModal::calculate_area(f.area());
             let modal = NewProjectModal::new(state);
+            f.render_widget(modal, area);
+        }
+        ModalState::Search(ref mut state) => {
+            let area = SearchModal::calculate_area(f.area());
+            let modal = SearchModal::new(state);
             f.render_widget(modal, area);
         }
     }
@@ -575,6 +986,12 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             }
             ChordState::CountPending { .. } => {
                 format!(" {} (j/k to move, Esc to cancel)", pending)
+            }
+            ChordState::BookmarkPending { .. } => {
+                format!(" {} (press 1-9 to set bookmark, Esc to cancel)", pending)
+            }
+            ChordState::RemoveBookmarkPending { .. } => {
+                format!(" {} (press 1-9 to remove bookmark, Esc to cancel)", pending)
             }
             ChordState::None => String::new(),
         };
@@ -626,48 +1043,95 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // Build mode indicator
+    let mode_indicator = build_mode_indicator(app);
+    let dangerous_indicator = build_dangerous_indicator(app);
+
     let help_text = match app.focus {
         Focus::Sidebar => {
-            let mut spans = Vec::new();
-            // Add mode indicator at the start if dangerous mode is active
-            if app.dangerous_mode {
-                spans.push(Span::styled(
-                    " -- DANGEROUS -- ",
-                    Style::default().fg(Color::Black).bg(Color::Red),
-                ));
+            let mut spans = vec![mode_indicator];
+            if let Some(danger) = dangerous_indicator.clone() {
+                spans.push(danger);
             }
             spans.extend(vec![
                 Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
                 Span::raw("nav "),
                 Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
                 Span::raw("open "),
-                Span::styled(" n ", Style::default().fg(Color::Cyan)),
-                Span::raw("new "),
+                Span::styled(" SPC ", Style::default().fg(Color::Cyan)),
+                Span::raw("leader "),
+                Span::styled(" / ", Style::default().fg(Color::Cyan)),
+                Span::raw("search "),
                 Span::styled(" dd ", Style::default().fg(Color::Cyan)),
                 Span::raw("close "),
-                Span::styled(" y ", Style::default().fg(Color::Cyan)),
-                Span::raw("yank "),
-                Span::styled(" D ", Style::default().fg(Color::Cyan)),
-                Span::raw(if app.dangerous_mode { "safe " } else { "danger " }),
                 Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
                 Span::raw("quit"),
             ]);
             spans
         }
-        Focus::Terminal => {
-            vec![
-                Span::styled(" C-h ", Style::default().fg(Color::Cyan)),
-                Span::raw("sidebar "),
-                Span::styled(" C-./C-, ", Style::default().fg(Color::Cyan)),
-                Span::raw("cycle "),
-                Span::styled(" PgUp/Dn ", Style::default().fg(Color::Cyan)),
-                Span::raw("scroll "),
-                Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
-                Span::raw("quit"),
-            ]
+        Focus::Terminal(_) => {
+            let mut spans = vec![mode_indicator];
+            if let Some(danger) = dangerous_indicator {
+                spans.push(danger);
+            }
+            // Show different hints based on mode
+            if matches!(app.input_mode, InputMode::Insert) {
+                spans.extend(vec![
+                    Span::styled(" jk ", Style::default().fg(Color::Cyan)),
+                    Span::raw("normal "),
+                    Span::styled(" C-h ", Style::default().fg(Color::Cyan)),
+                    Span::raw("sidebar "),
+                    Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
+                    Span::raw("quit"),
+                ]);
+            } else {
+                spans.extend(vec![
+                    Span::styled(" i ", Style::default().fg(Color::Cyan)),
+                    Span::raw("insert "),
+                    Span::styled(" SPC ", Style::default().fg(Color::Cyan)),
+                    Span::raw("leader "),
+                    Span::styled(" h ", Style::default().fg(Color::Cyan)),
+                    Span::raw("sidebar "),
+                    Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
+                    Span::raw("scroll "),
+                    Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
+                    Span::raw("quit"),
+                ]);
+            }
+            spans
         }
     };
 
     let help = Paragraph::new(Line::from(help_text)).style(Style::default().bg(Color::DarkGray));
     f.render_widget(help, area);
+}
+
+/// Build the mode indicator span for the help bar
+fn build_mode_indicator(app: &App) -> Span<'static> {
+    match &app.input_mode {
+        InputMode::Normal => Span::styled(
+            " -- NORMAL -- ",
+            Style::default().fg(Color::Black).bg(Color::Blue),
+        ),
+        InputMode::Insert => Span::styled(
+            " -- INSERT -- ",
+            Style::default().fg(Color::Black).bg(Color::Green),
+        ),
+        InputMode::Leader(_) => Span::styled(
+            " -- LEADER -- ",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        ),
+    }
+}
+
+/// Build the dangerous mode indicator span, if active
+fn build_dangerous_indicator(app: &App) -> Option<Span<'static>> {
+    if app.dangerous_mode {
+        Some(Span::styled(
+            " -- DANGEROUS -- ",
+            Style::default().fg(Color::Black).bg(Color::Red),
+        ))
+    } else {
+        None
+    }
 }
