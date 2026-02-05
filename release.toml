@@ -1,0 +1,22 @@
+# cargo-release configuration
+# https://github.com/crate-ci/cargo-release
+
+# Run tests before releasing
+pre-release-hook = ["cargo", "test", "--all-features"]
+
+# Commit message format
+pre-release-commit-message = "Release {{version}}"
+
+# Tag format (matches our workflow trigger)
+tag-prefix = "v"
+tag-message = "Release {{version}}"
+
+# Push to remote after tagging
+push = true
+push-options = ["--follow-tags"]
+
+# Don't publish to crates.io (our GitHub Action handles that)
+publish = false
+
+# Confirm before releasing
+sign-tag = false
