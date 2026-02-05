@@ -10,8 +10,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use crossterm::{
     event::{
-        poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
-        KeyModifiers, MouseEvent, MouseEventKind,
+        poll, read, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -47,8 +47,13 @@ fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode().context("Failed to enable raw mode - are you in a terminal?")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("Failed to setup terminal")?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("Failed to setup terminal")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
@@ -67,7 +72,8 @@ fn main() -> Result<()> {
     let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     );
     let _ = terminal.show_cursor();
 
@@ -148,6 +154,9 @@ fn run_app(
                 }
                 Event::Mouse(mouse) => {
                     handle_mouse_event(app, mouse);
+                }
+                Event::Paste(text) => {
+                    handle_paste_event(app, &text)?;
                 }
                 Event::Resize(w, h) => {
                     app.resize(w, h)?;
@@ -404,6 +413,18 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
         }
         _ => {}
     }
+}
+
+fn handle_paste_event(app: &mut App, text: &str) -> Result<()> {
+    // Only send paste to terminal when focused
+    if app.focus == Focus::Terminal {
+        // Send bracketed paste sequence to PTY so the child process knows it's a paste
+        // This allows readline and other tools to handle multi-line pastes correctly
+        app.write_to_pty(b"\x1b[200~")?;
+        app.write_to_pty(text.as_bytes())?;
+        app.write_to_pty(b"\x1b[201~")?;
+    }
+    Ok(())
 }
 
 fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
