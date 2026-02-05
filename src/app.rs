@@ -682,6 +682,14 @@ impl App {
                 }
 
                 if let Some((path, claude_session_id, conv)) = target {
+                    // Check if the working directory still exists
+                    if !path.exists() {
+                        // Directory was deleted (e.g., git worktree removed)
+                        // Just select the conversation but don't start a session
+                        self.selected_conversation = Some(conv);
+                        return Ok(());
+                    }
+
                     // Check if we already have a daemon session for this Claude session
                     let existing_session = self
                         .session_to_claude_id
