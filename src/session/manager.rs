@@ -227,6 +227,17 @@ impl ManagedSession {
         self.scroll_locked = false;
         self.vt_parser.set_scrollback(0);
     }
+
+    /// Jump to the top of the scrollback buffer.
+    pub fn scroll_to_top(&mut self) {
+        // Set a very large value - vt100 will clamp it to the actual max
+        self.vt_parser.set_scrollback(usize::MAX);
+        // Read back the actual clamped value
+        self.scroll_offset = self.vt_parser.screen().scrollback();
+        if self.scroll_offset > 0 {
+            self.scroll_locked = true;
+        }
+    }
 }
 
 /// Manages all PTY sessions.

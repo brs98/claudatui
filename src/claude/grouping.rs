@@ -255,6 +255,8 @@ mod tests {
             message_count: 1,
             git_branch: None,
             is_plan_implementation: false,
+            is_archived: false,
+            archived_at: None,
         }
     }
 

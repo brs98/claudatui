@@ -4,10 +4,15 @@
 //! - PTY session management
 //! - Claude conversation parsing and grouping
 //! - Terminal UI components
+//! - Bookmark management
 
 pub mod app;
+pub mod bookmarks;
 pub mod claude;
+pub mod config;
 pub mod event;
+pub mod input;
 pub mod pty;
+pub mod search;
 pub mod session;
 pub mod ui;

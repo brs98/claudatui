@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -43,6 +44,10 @@ pub struct Conversation {
     pub git_branch: Option<String>,
     /// Whether this is a plan implementation conversation (hidden from sidebar)
     pub is_plan_implementation: bool,
+    /// Whether this conversation is archived
+    pub is_archived: bool,
+    /// When this conversation was archived (if archived)
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 /// Message from a conversation JSONL file

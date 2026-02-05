@@ -11,13 +11,15 @@ use crate::session::{CellAttrs, ScreenState, SessionState, TermColor};
 pub struct TerminalPane<'a> {
     session_state: Option<&'a SessionState>,
     focused: bool,
+    preview: bool,
 }
 
 impl<'a> TerminalPane<'a> {
-    pub fn new(session_state: Option<&'a SessionState>, focused: bool) -> Self {
+    pub fn new(session_state: Option<&'a SessionState>, focused: bool, preview: bool) -> Self {
         Self {
             session_state,
             focused,
+            preview,
         }
     }
 }
@@ -33,8 +35,14 @@ impl<'a> Widget for TerminalPane<'a> {
         // Get scroll offset from session if available
         let scroll_offset = self.session_state.map(|s| s.scroll_offset).unwrap_or(0);
 
-        // Show scroll indicator in title when scrolled
-        let title = if scroll_offset > 0 {
+        // Show scroll/preview indicators in title
+        let title = if self.preview {
+            if scroll_offset > 0 {
+                format!(" Claude Code [PREVIEW] [SCROLLED: -{}] ", scroll_offset)
+            } else {
+                " Claude Code [PREVIEW] ".to_string()
+            }
+        } else if scroll_offset > 0 {
             format!(" Claude Code [SCROLLED: -{}] ", scroll_offset)
         } else {
             " Claude Code ".to_string()

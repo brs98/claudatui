@@ -737,8 +737,8 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
             app.new_conversation_in_selected_group()?;
         }
 
-        // 'i' toggles hide inactive (was 'a')
-        KeyCode::Char('i') => {
+        // Tab toggles hide inactive
+        KeyCode::Tab => {
             app.sidebar_state.toggle_hide_inactive();
         }
 
