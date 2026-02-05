@@ -5,10 +5,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 pub fn create_layout(area: Rect) -> [Rect; 2] {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(75),
-        ])
+        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
         .split(area);
 
     [chunks[0], chunks[1]]
@@ -18,10 +15,7 @@ pub fn create_layout(area: Rect) -> [Rect; 2] {
 pub fn create_layout_with_help(area: Rect) -> (Rect, Rect, Rect) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
     let main_area = vertical[0];
@@ -29,10 +23,7 @@ pub fn create_layout_with_help(area: Rect) -> (Rect, Rect, Rect) {
 
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(75),
-        ])
+        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
         .split(main_area);
 
     (horizontal[0], horizontal[1], help_area)

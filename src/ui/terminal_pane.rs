@@ -31,10 +31,7 @@ impl<'a> Widget for TerminalPane<'a> {
         };
 
         // Get scroll offset from session if available
-        let scroll_offset = self
-            .session_state
-            .map(|s| s.scroll_offset)
-            .unwrap_or(0);
+        let scroll_offset = self.session_state.map(|s| s.scroll_offset).unwrap_or(0);
 
         // Show scroll indicator in title when scrolled
         let title = if scroll_offset > 0 {
@@ -58,7 +55,8 @@ impl<'a> Widget for TerminalPane<'a> {
             None => {
                 // Show placeholder when no PTY is active
                 let placeholder = "Press Enter to start Claude Code in selected directory";
-                let x = inner_area.x + (inner_area.width.saturating_sub(placeholder.len() as u16)) / 2;
+                let x =
+                    inner_area.x + (inner_area.width.saturating_sub(placeholder.len() as u16)) / 2;
                 let y = inner_area.y + inner_area.height / 2;
                 if y < inner_area.y + inner_area.height && x < inner_area.x + inner_area.width {
                     buf.set_string(x, y, placeholder, Style::default().fg(Color::DarkGray));

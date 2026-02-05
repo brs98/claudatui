@@ -12,7 +12,9 @@ use crate::claude::sessions::{parse_all_sessions, SessionEntry};
 use crate::claude::SessionsWatcher;
 use crate::session::{SessionManager, SessionState};
 use crate::ui::modal::NewProjectModalState;
-use crate::ui::sidebar::{build_sidebar_items, group_has_active_content, SidebarItem, SidebarState};
+use crate::ui::sidebar::{
+    build_sidebar_items, group_has_active_content, SidebarItem, SidebarState,
+};
 
 /// Clipboard status for feedback display
 #[derive(Debug, Clone)]
@@ -877,7 +879,11 @@ impl App {
     }
 
     /// Update the status of a conversation in the groups vector
-    fn update_conversation_status_in_groups(&mut self, session_id: &str, status: ConversationStatus) {
+    fn update_conversation_status_in_groups(
+        &mut self,
+        session_id: &str,
+        status: ConversationStatus,
+    ) {
         for group in &mut self.groups {
             for conv in group.conversations_mut() {
                 if conv.session_id == session_id {
@@ -996,11 +1002,8 @@ impl App {
     /// - Not matching conversations already claimed by another daemon session
     fn cleanup_persisted_ephemeral_sessions(&mut self) {
         // Build list of all conversations
-        let all_convs: Vec<&Conversation> = self
-            .groups
-            .iter()
-            .flat_map(|g| g.conversations())
-            .collect();
+        let all_convs: Vec<&Conversation> =
+            self.groups.iter().flat_map(|g| g.conversations()).collect();
 
         // Track which Claude session IDs are already claimed by a daemon
         let claimed_ids: HashSet<String> = self
@@ -1205,11 +1208,10 @@ impl App {
                 }
                 None
             }
-            Some(SidebarItem::EphemeralSession { session_id, .. }) => {
-                self.ephemeral_sessions
-                    .get(session_id)
-                    .map(|e| &e.project_path)
-            }
+            Some(SidebarItem::EphemeralSession { session_id, .. }) => self
+                .ephemeral_sessions
+                .get(session_id)
+                .map(|e| &e.project_path),
             _ => None,
         }
     }

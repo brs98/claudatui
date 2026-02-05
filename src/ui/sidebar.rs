@@ -193,7 +193,10 @@ fn build_list_items(
                             Span::raw("  "),
                             Span::styled("● ", Style::default().fg(Color::Green)),
                             Span::styled(
-                                format!("New conversation ({})", &session_id[session_id.len().saturating_sub(1)..]),
+                                format!(
+                                    "New conversation ({})",
+                                    &session_id[session_id.len().saturating_sub(1)..]
+                                ),
                                 Style::default().add_modifier(Modifier::ITALIC),
                             ),
                         ])));
@@ -220,11 +223,16 @@ fn build_list_items(
 
             // Determine how many conversations to show (from filtered list)
             let is_expanded = expanded_conversations.contains(&group_key);
-            let visible_convos: Vec<_> = if is_expanded || filtered_convos.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
-                filtered_convos.to_vec()
-            } else {
-                filtered_convos.iter().take(DEFAULT_VISIBLE_CONVERSATIONS).copied().collect()
-            };
+            let visible_convos: Vec<_> =
+                if is_expanded || filtered_convos.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
+                    filtered_convos.to_vec()
+                } else {
+                    filtered_convos
+                        .iter()
+                        .take(DEFAULT_VISIBLE_CONVERSATIONS)
+                        .copied()
+                        .collect()
+                };
 
             // Then show saved conversations (limited or all)
             for conv in &visible_convos {
@@ -358,12 +366,29 @@ pub fn group_has_active_content(
 /// Represents an item in the flattened sidebar list
 #[derive(Debug, Clone)]
 pub enum SidebarItem {
-    GroupHeader { key: String, #[allow(dead_code)] name: String },
-    Conversation { group_key: String, index: usize },
+    GroupHeader {
+        key: String,
+        #[allow(dead_code)]
+        name: String,
+    },
+    Conversation {
+        group_key: String,
+        index: usize,
+    },
     /// A running session that hasn't been saved yet (temp session)
-    EphemeralSession { session_id: String, group_key: String },
-    ShowMoreProjects { #[allow(dead_code)] hidden_count: usize },
-    ShowMoreConversations { group_key: String, #[allow(dead_code)] hidden_count: usize },
+    EphemeralSession {
+        session_id: String,
+        group_key: String,
+    },
+    ShowMoreProjects {
+        #[allow(dead_code)]
+        hidden_count: usize,
+    },
+    ShowMoreConversations {
+        group_key: String,
+        #[allow(dead_code)]
+        hidden_count: usize,
+    },
 }
 
 /// Build a flat list of sidebar items for navigation
@@ -432,11 +457,16 @@ pub fn build_sidebar_items(
 
             // Determine how many conversations to show (from filtered list)
             let is_expanded = expanded_conversations.contains(&group_key);
-            let visible_indices: Vec<usize> = if is_expanded || filtered_indices.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
-                filtered_indices.clone()
-            } else {
-                filtered_indices.iter().take(DEFAULT_VISIBLE_CONVERSATIONS).copied().collect()
-            };
+            let visible_indices: Vec<usize> =
+                if is_expanded || filtered_indices.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
+                    filtered_indices.clone()
+                } else {
+                    filtered_indices
+                        .iter()
+                        .take(DEFAULT_VISIBLE_CONVERSATIONS)
+                        .copied()
+                        .collect()
+                };
 
             // Then add saved conversations (limited or all)
             for index in visible_indices {

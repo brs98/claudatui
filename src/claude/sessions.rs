@@ -135,13 +135,7 @@ fn discover_session_files(project_dir: &Path) -> HashMap<String, SessionFile> {
             Err(_) => 0,
         };
 
-        sessions.insert(
-            session_id,
-            SessionFile {
-                path,
-                file_mtime,
-            },
-        );
+        sessions.insert(session_id, SessionFile { path, file_mtime });
     }
 
     sessions

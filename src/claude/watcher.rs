@@ -23,7 +23,8 @@ impl SessionsWatcher {
                         for path in event.paths {
                             // Watch for sessions-index.json and .jsonl file changes
                             // This ensures new sessions appear immediately when their file is created
-                            let is_index = path.file_name().is_some_and(|n| n == "sessions-index.json");
+                            let is_index =
+                                path.file_name().is_some_and(|n| n == "sessions-index.json");
                             let is_jsonl = path.extension().is_some_and(|ext| ext == "jsonl");
 
                             if is_index || is_jsonl {

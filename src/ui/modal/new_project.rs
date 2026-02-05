@@ -97,43 +97,55 @@ impl NewProjectModalState {
             // Use vim-style navigation: h/j/k/l
             KeyCode::Char('h') | KeyCode::Left => {
                 // Go to parent directory
-                let _ = self.file_explorer.handle(&crossterm::event::Event::Key(KeyEvent::new(
-                    KeyCode::Left,
-                    KeyModifiers::NONE,
-                )));
+                let _ = self
+                    .file_explorer
+                    .handle(&crossterm::event::Event::Key(KeyEvent::new(
+                        KeyCode::Left,
+                        KeyModifiers::NONE,
+                    )));
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                let _ = self.file_explorer.handle(&crossterm::event::Event::Key(KeyEvent::new(
-                    KeyCode::Down,
-                    KeyModifiers::NONE,
-                )));
+                let _ = self
+                    .file_explorer
+                    .handle(&crossterm::event::Event::Key(KeyEvent::new(
+                        KeyCode::Down,
+                        KeyModifiers::NONE,
+                    )));
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                let _ = self.file_explorer.handle(&crossterm::event::Event::Key(KeyEvent::new(
-                    KeyCode::Up,
-                    KeyModifiers::NONE,
-                )));
+                let _ = self
+                    .file_explorer
+                    .handle(&crossterm::event::Event::Key(KeyEvent::new(
+                        KeyCode::Up,
+                        KeyModifiers::NONE,
+                    )));
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 // Enter directory
-                let _ = self.file_explorer.handle(&crossterm::event::Event::Key(KeyEvent::new(
-                    KeyCode::Right,
-                    KeyModifiers::NONE,
-                )));
+                let _ = self
+                    .file_explorer
+                    .handle(&crossterm::event::Event::Key(KeyEvent::new(
+                        KeyCode::Right,
+                        KeyModifiers::NONE,
+                    )));
             }
             KeyCode::Char('g') => {
                 // Jump to first
-                let _ = self.file_explorer.handle(&crossterm::event::Event::Key(KeyEvent::new(
-                    KeyCode::Home,
-                    KeyModifiers::NONE,
-                )));
+                let _ = self
+                    .file_explorer
+                    .handle(&crossterm::event::Event::Key(KeyEvent::new(
+                        KeyCode::Home,
+                        KeyModifiers::NONE,
+                    )));
             }
             KeyCode::Char('G') => {
                 // Jump to last
-                let _ = self.file_explorer.handle(&crossterm::event::Event::Key(KeyEvent::new(
-                    KeyCode::End,
-                    KeyModifiers::NONE,
-                )));
+                let _ = self
+                    .file_explorer
+                    .handle(&crossterm::event::Event::Key(KeyEvent::new(
+                        KeyCode::End,
+                        KeyModifiers::NONE,
+                    )));
             }
             _ => {}
         }
@@ -230,8 +242,12 @@ impl<'a> NewProjectModal<'a> {
 
     /// Calculate the modal area (centered, 60% width, 70% height)
     pub fn calculate_area(total: Rect) -> Rect {
-        let width = (total.width * 60 / 100).max(40).min(total.width.saturating_sub(4));
-        let height = (total.height * 70 / 100).max(15).min(total.height.saturating_sub(4));
+        let width = (total.width * 60 / 100)
+            .max(40)
+            .min(total.width.saturating_sub(4));
+        let height = (total.height * 70 / 100)
+            .max(15)
+            .min(total.height.saturating_sub(4));
 
         let x = (total.width.saturating_sub(width)) / 2;
         let y = (total.height.saturating_sub(height)) / 2;
@@ -284,13 +300,19 @@ impl Widget for NewProjectModal<'_> {
 impl NewProjectModal<'_> {
     fn render_tab_bar(&self, area: Rect, buf: &mut Buffer) {
         let browse_style = if self.state.active_tab == NewProjectTab::Browse {
-            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
 
         let path_style = if self.state.active_tab == NewProjectTab::EnterPath {
-            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
@@ -332,10 +354,8 @@ impl NewProjectModal<'_> {
 
         // Error message if any
         if let Some(ref error) = self.state.error_message {
-            let error_line = Line::from(Span::styled(
-                error.clone(),
-                Style::default().fg(Color::Red),
-            ));
+            let error_line =
+                Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red)));
             Paragraph::new(error_line).render(chunks[2], buf);
         }
     }
@@ -394,10 +414,7 @@ impl NewProjectModal<'_> {
         }
         // If cursor is at the end, show a block cursor
         if cursor_offset >= visible_text.len() {
-            spans.push(Span::styled(
-                " ",
-                Style::default().bg(Color::White),
-            ));
+            spans.push(Span::styled(" ", Style::default().bg(Color::White)));
         }
 
         let input_line = Line::from(spans);
@@ -405,10 +422,8 @@ impl NewProjectModal<'_> {
 
         // Error message if any
         if let Some(ref error) = self.state.error_message {
-            let error_line = Line::from(Span::styled(
-                error.clone(),
-                Style::default().fg(Color::Red),
-            ));
+            let error_line =
+                Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red)));
             Paragraph::new(error_line).render(chunks[2], buf);
         }
     }

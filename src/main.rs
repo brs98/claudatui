@@ -140,8 +140,7 @@ fn run_app(
                             match perform_hot_reload() {
                                 Ok(binary_path) => return Ok(HotReloadAction::Exec(binary_path)),
                                 Err(e) => {
-                                    hot_reload_status =
-                                        HotReloadStatus::BuildFailed(e.to_string());
+                                    hot_reload_status = HotReloadStatus::BuildFailed(e.to_string());
                                 }
                             }
                         }
@@ -503,7 +502,10 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
         HotReloadStatus::None => draw_help_bar(f, help_area, app),
         HotReloadStatus::Building => {
             let msg = Paragraph::new(Line::from(vec![
-                Span::styled(" BUILDING ", Style::default().fg(Color::Black).bg(Color::Yellow)),
+                Span::styled(
+                    " BUILDING ",
+                    Style::default().fg(Color::Black).bg(Color::Yellow),
+                ),
                 Span::raw(" Running cargo build --release..."),
             ]))
             .style(Style::default().bg(Color::DarkGray));
@@ -511,7 +513,10 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
         }
         HotReloadStatus::BuildFailed(err) => {
             let msg = Paragraph::new(Line::from(vec![
-                Span::styled(" BUILD FAILED ", Style::default().fg(Color::White).bg(Color::Red)),
+                Span::styled(
+                    " BUILD FAILED ",
+                    Style::default().fg(Color::White).bg(Color::Red),
+                ),
                 Span::raw(format!(" {} (press any key to dismiss)", err)),
             ]))
             .style(Style::default().bg(Color::DarkGray));
@@ -563,7 +568,10 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             ChordState::None => String::new(),
         };
         let msg = Paragraph::new(Line::from(vec![
-            Span::styled(" PENDING ", Style::default().fg(Color::Black).bg(Color::Yellow)),
+            Span::styled(
+                " PENDING ",
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ),
             Span::raw(hint),
         ]))
         .style(Style::default().bg(Color::DarkGray));
@@ -579,7 +587,10 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             path.to_string()
         };
         let msg = Paragraph::new(Line::from(vec![
-            Span::styled(" COPIED ", Style::default().fg(Color::Black).bg(Color::Green)),
+            Span::styled(
+                " COPIED ",
+                Style::default().fg(Color::Black).bg(Color::Green),
+            ),
             Span::raw(format!(" {}", display_path)),
         ]))
         .style(Style::default().bg(Color::DarkGray));
@@ -592,7 +603,10 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
     if let Some((is_auto, _elapsed)) = app.recent_refresh(2000) {
         if !is_auto {
             let msg = Paragraph::new(Line::from(vec![
-                Span::styled(" REFRESHED ", Style::default().fg(Color::Black).bg(Color::Green)),
+                Span::styled(
+                    " REFRESHED ",
+                    Style::default().fg(Color::Black).bg(Color::Green),
+                ),
                 Span::raw(" Sessions list updated"),
             ]))
             .style(Style::default().bg(Color::DarkGray));

@@ -29,10 +29,14 @@ impl ConversationGroup {
     /// Get a unique key for this group
     pub fn key(&self) -> String {
         match self {
-            Self::Worktree { repo_path, branch, .. } => {
+            Self::Worktree {
+                repo_path, branch, ..
+            } => {
                 format!("worktree:{}:{}", repo_path.display(), branch)
             }
-            Self::Directory { parent, project, .. } => {
+            Self::Directory {
+                parent, project, ..
+            } => {
                 format!("dir:{}:{}", parent, project)
             }
             Self::Ungrouped { path, .. } => {
@@ -44,21 +48,24 @@ impl ConversationGroup {
     /// Get display name for the group
     pub fn display_name(&self) -> String {
         match self {
-            Self::Worktree { repo_path, branch, .. } => {
+            Self::Worktree {
+                repo_path, branch, ..
+            } => {
                 let repo_name = repo_path
                     .file_name()
                     .map(|n| n.to_string_lossy().replace(".git", ""))
                     .unwrap_or_else(|| "repo".to_string());
                 format!("{} ({})", repo_name, branch)
             }
-            Self::Directory { parent, project, .. } => {
+            Self::Directory {
+                parent, project, ..
+            } => {
                 format!("{}/{}", parent, project)
             }
-            Self::Ungrouped { path, .. } => {
-                path.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.to_string_lossy().to_string())
-            }
+            Self::Ungrouped { path, .. } => path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string()),
         }
     }
 
@@ -168,7 +175,9 @@ pub fn group_conversations_unordered(conversations: Vec<Conversation>) -> Vec<Co
 
     // Sort conversations within each group by timestamp (most recent first)
     for group in &mut result {
-        group.conversations_mut().sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        group
+            .conversations_mut()
+            .sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     }
 
     result
@@ -177,8 +186,18 @@ pub fn group_conversations_unordered(conversations: Vec<Conversation>) -> Vec<Co
 /// Sort groups by most recent conversation (for initial/manual refresh)
 pub fn sort_groups_by_recency(groups: &mut Vec<ConversationGroup>) {
     groups.sort_by(|a, b| {
-        let a_time = a.conversations().iter().map(|c| c.timestamp).max().unwrap_or(0);
-        let b_time = b.conversations().iter().map(|c| c.timestamp).max().unwrap_or(0);
+        let a_time = a
+            .conversations()
+            .iter()
+            .map(|c| c.timestamp)
+            .max()
+            .unwrap_or(0);
+        let b_time = b
+            .conversations()
+            .iter()
+            .map(|c| c.timestamp)
+            .max()
+            .unwrap_or(0);
         b_time.cmp(&a_time)
     });
 }
@@ -194,18 +213,15 @@ pub fn order_groups_by_keys(
 ) -> (Vec<ConversationGroup>, Vec<String>) {
     // Separate new groups (not in key_order) from existing groups
     let key_set: std::collections::HashSet<&String> = key_order.iter().collect();
-    let (mut new_groups, existing_groups): (Vec<_>, Vec<_>) = groups
-        .drain(..)
-        .partition(|g| !key_set.contains(&g.key()));
+    let (mut new_groups, existing_groups): (Vec<_>, Vec<_>) =
+        groups.drain(..).partition(|g| !key_set.contains(&g.key()));
 
     // Sort new groups by recency (most recent first)
     sort_groups_by_recency(&mut new_groups);
 
     // Build a map for quick lookup of existing groups by key
-    let mut groups_by_key: HashMap<String, ConversationGroup> = existing_groups
-        .into_iter()
-        .map(|g| (g.key(), g))
-        .collect();
+    let mut groups_by_key: HashMap<String, ConversationGroup> =
+        existing_groups.into_iter().map(|g| (g.key(), g)).collect();
 
     // Build result: new groups first (sorted by recency), then existing groups in key_order
     let mut result: Vec<ConversationGroup> = new_groups;

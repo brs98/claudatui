@@ -71,7 +71,8 @@ pub fn parse_conversation(path: &Path) -> Result<(String, ConversationStatus)> {
         return Ok(("(No messages)".to_string(), ConversationStatus::Idle));
     }
 
-    let file = File::open(path).with_context(|| format!("Failed to open conversation: {:?}", path))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open conversation: {:?}", path))?;
     let reader = BufReader::new(file);
 
     let mut first_user_message: Option<String> = None;

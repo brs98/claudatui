@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtyPair};
+use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
