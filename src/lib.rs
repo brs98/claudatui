@@ -8,6 +8,8 @@
 pub mod app;
 pub mod claude;
 pub mod event;
+#[cfg(feature = "git")]
+pub mod git;
 pub mod pty;
 pub mod session;
 pub mod ui;

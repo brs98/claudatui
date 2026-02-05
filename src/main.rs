@@ -28,6 +28,8 @@ use ratatui::{
 use app::{App, ChordState, Focus, ModalState};
 use ui::layout::create_layout_with_help;
 use ui::modal::NewProjectModal;
+#[cfg(feature = "git")]
+use ui::modal::NewBranchModal;
 use ui::sidebar::Sidebar;
 use ui::terminal_pane::TerminalPane;
 
@@ -242,6 +244,15 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
             }
             Ok(KeyAction::Continue)
         }
+        #[cfg(feature = "git")]
+        ModalState::NewBranch(ref mut state) => {
+            // Handle key and check if a branch name was confirmed
+            if let Some(branch_name) = state.handle_key(key) {
+                // Branch name was confirmed - create worktree and start session
+                app.confirm_new_branch(branch_name)?;
+            }
+            Ok(KeyAction::Continue)
+        }
     }
 }
 
@@ -345,6 +356,13 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
         KeyCode::Char('n') => {
             // Open new project modal
             app.open_new_project_modal();
+        }
+        #[cfg(feature = "git")]
+        KeyCode::Char('b') => {
+            // Open new branch modal (only if on a worktree group)
+            if app.can_create_branch() {
+                app.open_new_branch_modal()?;
+            }
         }
         KeyCode::Enter => {
             app.open_selected()?;
@@ -534,6 +552,12 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
         ModalState::NewProject(ref mut state) => {
             let area = NewProjectModal::calculate_area(f.area());
             let modal = NewProjectModal::new(state);
+            f.render_widget(modal, area);
+        }
+        #[cfg(feature = "git")]
+        ModalState::NewBranch(ref mut state) => {
+            let area = NewBranchModal::calculate_area(f.area());
+            let modal = NewBranchModal::new(state);
             f.render_widget(modal, area);
         }
     }

@@ -12,6 +12,8 @@ use crate::claude::sessions::{parse_all_sessions, SessionEntry};
 use crate::claude::SessionsWatcher;
 use crate::session::{SessionManager, SessionState};
 use crate::ui::modal::NewProjectModalState;
+#[cfg(feature = "git")]
+use crate::ui::modal::NewBranchModalState;
 use crate::ui::sidebar::{
     build_sidebar_items, group_has_active_content, SidebarItem, SidebarState,
 };
@@ -29,6 +31,9 @@ pub enum ModalState {
     None,
     /// New project modal is open
     NewProject(Box<NewProjectModalState>),
+    /// New branch modal is open (git feature)
+    #[cfg(feature = "git")]
+    NewBranch(Box<NewBranchModalState>),
 }
 
 /// Which pane is currently focused
@@ -1256,6 +1261,99 @@ impl App {
 
         // Start a new session in the selected directory
         self.start_session(&path, None)?;
+        self.selected_conversation = None;
+        self.focus = Focus::Terminal;
+
+        Ok(())
+    }
+
+    /// Check if the currently selected sidebar item supports creating a branch.
+    /// Returns true if the selected item is a Worktree group header.
+    #[cfg(feature = "git")]
+    pub fn can_create_branch(&self) -> bool {
+        use crate::claude::grouping::ConversationGroup;
+        use crate::ui::sidebar::SidebarItem;
+
+        let items = self.sidebar_items();
+        let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
+
+        match items.get(selected) {
+            Some(SidebarItem::GroupHeader { key, .. }) => {
+                // Check if this group is a Worktree group
+                self.groups
+                    .iter()
+                    .any(|g| g.key() == *key && matches!(g, ConversationGroup::Worktree { .. }))
+            }
+            _ => false,
+        }
+    }
+
+    /// Open the new branch modal for the currently selected worktree group.
+    #[cfg(feature = "git")]
+    pub fn open_new_branch_modal(&mut self) -> Result<()> {
+        use crate::claude::grouping::ConversationGroup;
+        use crate::git::get_repo_from_worktree_path;
+        use crate::ui::sidebar::SidebarItem;
+
+        let items = self.sidebar_items();
+        let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
+
+        // Get the group key from the selected item
+        let group_key = match items.get(selected) {
+            Some(SidebarItem::GroupHeader { key, .. }) => key.clone(),
+            _ => return Ok(()), // Not on a group header
+        };
+
+        // Find the group and get the worktree path
+        let worktree_path = self
+            .groups
+            .iter()
+            .find(|g| g.key() == group_key)
+            .and_then(|g| match g {
+                ConversationGroup::Worktree { .. } => g.project_path(),
+                _ => None,
+            });
+
+        let Some(path) = worktree_path else {
+            return Ok(()); // Not a worktree group
+        };
+
+        // Get repo info from the worktree path
+        let (_, repo_info) = get_repo_from_worktree_path(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to open repository: {}", e))?;
+
+        self.modal_state = ModalState::NewBranch(Box::new(NewBranchModalState::new(
+            repo_info,
+            path,
+        )));
+
+        Ok(())
+    }
+
+    /// Confirm the new branch modal and create the worktree.
+    #[cfg(feature = "git")]
+    pub fn confirm_new_branch(&mut self, branch_name: String) -> Result<()> {
+        use crate::git::{create_worktree, get_repo_from_worktree_path};
+
+        // Get the base path from the modal state
+        let base_path = match &self.modal_state {
+            ModalState::NewBranch(state) => state.base_path.clone(),
+            _ => return Ok(()),
+        };
+
+        // Close the modal first
+        self.modal_state = ModalState::None;
+
+        // Get the repository
+        let (repo, _) = get_repo_from_worktree_path(&base_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open repository: {}", e))?;
+
+        // Create the worktree
+        let new_worktree_path = create_worktree(&repo, &branch_name, &base_path)
+            .map_err(|e| anyhow::anyhow!("Failed to create worktree: {}", e))?;
+
+        // Start a new session in the new worktree
+        self.start_session(&new_worktree_path, None)?;
         self.selected_conversation = None;
         self.focus = Focus::Terminal;
 
