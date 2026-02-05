@@ -381,9 +381,6 @@ fn execute_leader_action(app: &mut App, action: LeaderAction) -> Result<()> {
         LeaderAction::YankPath => {
             app.copy_selected_path_to_clipboard();
         }
-        LeaderAction::ToggleInactive => {
-            app.sidebar_state.toggle_hide_inactive();
-        }
         LeaderAction::ToggleDangerous => {
             app.toggle_dangerous_mode();
         }
@@ -697,12 +694,6 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
                 }
             }
         }
-        // BookmarkPending and RemoveBookmarkPending are no longer used
-        // (bookmarks are now accessed via leader key menu)
-        ChordState::BookmarkPending { .. } | ChordState::RemoveBookmarkPending { .. } => {
-            app.chord_state = ChordState::None;
-            // Fall through to handle key normally
-        }
         ChordState::None => {}
     }
 
@@ -758,12 +749,9 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
             app.clear_preview();
         }
 
-        // Project cycling
-        KeyCode::Char(']') => {
-            let _ = app.cycle_and_switch_to_active(true);
-        }
-        KeyCode::Char('[') => {
-            let _ = app.cycle_and_switch_to_active(false);
+        // Focus terminal (mirrors 'h' in terminal mode for sidebar)
+        KeyCode::Char('l') => {
+            app.set_focus(Focus::Terminal(TerminalPaneId::Primary));
         }
 
         // Quick access actions (also available via leader)
@@ -1022,12 +1010,6 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             }
             ChordState::CountPending { .. } => {
                 format!(" {} (j/k to move, Esc to cancel)", pending)
-            }
-            ChordState::BookmarkPending { .. } => {
-                format!(" {} (press 1-9 to set bookmark, Esc to cancel)", pending)
-            }
-            ChordState::RemoveBookmarkPending { .. } => {
-                format!(" {} (press 1-9 to remove bookmark, Esc to cancel)", pending)
             }
             ChordState::None => String::new(),
         };

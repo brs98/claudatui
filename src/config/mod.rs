@@ -14,12 +14,21 @@ pub struct Config {
     /// Layout configuration
     #[serde(default)]
     pub layout: LayoutConfig,
+
+    /// Whether dangerous mode (--dangerously-skip-permissions) is enabled
+    #[serde(default = "default_dangerous_mode")]
+    pub dangerous_mode: bool,
+}
+
+fn default_dangerous_mode() -> bool {
+    true
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             layout: LayoutConfig::default(),
+            dangerous_mode: true,
         }
     }
 }
@@ -136,6 +145,7 @@ mod tests {
         assert_eq!(config.layout.sidebar_width_pct, 25);
         assert_eq!(config.layout.sidebar_position, SidebarPosition::Left);
         assert!(!config.layout.sidebar_minimized);
+        assert!(config.dangerous_mode);
     }
 
     #[test]

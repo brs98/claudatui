@@ -5,6 +5,8 @@ use std::time::Instant;
 use anyhow::Result;
 use crossterm::event::KeyEvent;
 
+use ratatui::layout::Rect;
+
 use crate::bookmarks::{Bookmark, BookmarkManager, BookmarkTarget};
 use crate::claude::archive::ArchiveManager;
 use crate::config::{Config, SidebarPosition};
@@ -37,6 +39,56 @@ pub enum ArchiveStatus {
     None,
     Archived { session_id: String, at: Instant },
     Unarchived { session_id: String, at: Instant },
+}
+
+/// A position within the terminal content grid (row/col in screen coordinates)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalPosition {
+    pub row: usize,
+    pub col: usize,
+}
+
+/// Text selection in the terminal pane (anchor = mouse down, cursor = current drag position)
+#[derive(Debug, Clone)]
+pub struct TextSelection {
+    pub anchor: TerminalPosition,
+    pub cursor: TerminalPosition,
+}
+
+impl TextSelection {
+    /// Return (start, end) sorted top-left to bottom-right
+    pub fn ordered(&self) -> (TerminalPosition, TerminalPosition) {
+        if self.anchor.row < self.cursor.row
+            || (self.anchor.row == self.cursor.row && self.anchor.col <= self.cursor.col)
+        {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    /// Check if a cell is within the selection (standard terminal stream selection)
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        let (start, end) = self.ordered();
+        if start.row == end.row {
+            // Single line: col must be in [start.col, end.col]
+            row == start.row && col >= start.col && col <= end.col
+        } else if row == start.row {
+            // First line: from start.col to end of line
+            col >= start.col
+        } else if row == end.row {
+            // Last line: from start of line to end.col
+            col <= end.col
+        } else {
+            // Middle lines: fully selected
+            row > start.row && row < end.row
+        }
+    }
+
+    /// True when anchor and cursor are the same position (no real selection)
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.cursor
+    }
 }
 
 /// Modal dialog state
@@ -139,10 +191,6 @@ pub enum ChordState {
     DeletePending { started_at: Instant },
     /// Count prefix accumulating (e.g., "4" waiting for j/k to move 4 lines)
     CountPending { count: u32, started_at: Instant },
-    /// 'b' pressed, waiting for slot number (1-9) to bookmark current item
-    BookmarkPending { started_at: Instant },
-    /// 'B' pressed, waiting for slot number (1-9) to remove bookmark
-    RemoveBookmarkPending { started_at: Instant },
 }
 
 /// Info about an active session found in a group
@@ -242,6 +290,10 @@ pub struct App {
     pub which_key_config: WhichKeyConfig,
     /// State for jk/kj rapid-press escape sequence detection
     pub escape_seq_state: EscapeSequenceState,
+    /// Active text selection in terminal pane (mouse drag)
+    pub text_selection: Option<TextSelection>,
+    /// Cached inner area of terminal pane (set during render, used for mouse coordinate mapping)
+    pub terminal_inner_area: Option<Rect>,
 }
 
 impl App {
@@ -291,7 +343,7 @@ impl App {
             chord_state: ChordState::None,
             clipboard_status: ClipboardStatus::None,
             group_order: Vec::new(),
-            dangerous_mode: false,
+            dangerous_mode: config.dangerous_mode,
             dangerous_mode_toggled_at: None,
             modal_state: ModalState::None,
             toast_manager: ToastManager::new(),
@@ -303,6 +355,8 @@ impl App {
             input_mode: InputMode::default(),
             which_key_config: WhichKeyConfig::new(),
             escape_seq_state: EscapeSequenceState::None,
+            text_selection: None,
+            terminal_inner_area: None,
         };
 
         app.load_conversations_full()?;
@@ -1626,6 +1680,35 @@ impl App {
         }
     }
 
+    /// Clear the text selection
+    pub fn clear_selection(&mut self) {
+        self.text_selection = None;
+    }
+
+    /// Copy the current text selection to the system clipboard
+    pub fn copy_selection_to_clipboard(&mut self) {
+        let text = match (&self.text_selection, &self.session_state_cache) {
+            (Some(sel), Some(state)) => extract_selected_text(&state.screen, sel),
+            _ => return,
+        };
+
+        if text.is_empty() {
+            return;
+        }
+
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            if clipboard.set_text(&text).is_ok() {
+                let lines = text.lines().count();
+                let chars = text.len();
+                self.toast_success(format!("Copied selection ({lines} lines, {chars} chars)"));
+            } else {
+                self.toast_error("Failed to copy selection");
+            }
+        } else {
+            self.toast_error("Clipboard unavailable");
+        }
+    }
+
     /// Get the project path of the currently selected sidebar item
     fn get_selected_path(&self) -> Option<&PathBuf> {
         // First try selected conversation
@@ -1661,6 +1744,8 @@ impl App {
     pub fn toggle_dangerous_mode(&mut self) {
         self.dangerous_mode = !self.dangerous_mode;
         self.dangerous_mode_toggled_at = Some(Instant::now());
+        self.config.dangerous_mode = self.dangerous_mode;
+        let _ = self.config.save();
         if self.dangerous_mode {
             self.toast_warning("Dangerous mode enabled");
         } else {
@@ -2274,9 +2359,7 @@ impl ChordState {
         match self {
             ChordState::None => false,
             ChordState::DeletePending { started_at }
-            | ChordState::CountPending { started_at, .. }
-            | ChordState::BookmarkPending { started_at }
-            | ChordState::RemoveBookmarkPending { started_at } => {
+            | ChordState::CountPending { started_at, .. } => {
                 started_at.elapsed().as_millis() as u64 > CHORD_TIMEOUT_MS
             }
         }
@@ -2289,8 +2372,6 @@ impl ChordState {
             ChordState::None => None,
             ChordState::DeletePending { .. } => Some("d".to_string()),
             ChordState::CountPending { count, .. } => Some(count.to_string()),
-            ChordState::BookmarkPending { .. } => Some("b".to_string()),
-            ChordState::RemoveBookmarkPending { .. } => Some("B".to_string()),
         }
     }
 }

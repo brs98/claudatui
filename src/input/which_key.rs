@@ -38,8 +38,6 @@ pub enum LeaderAction {
     Refresh,
     /// Yank (copy) path to clipboard
     YankPath,
-    /// Toggle hide inactive
-    ToggleInactive,
     /// Toggle dangerous mode
     ToggleDangerous,
 
@@ -178,7 +176,6 @@ impl WhichKeyConfig {
             // Other actions
             LeaderCommand::action('r', "refresh", LeaderAction::Refresh),
             LeaderCommand::action('y', "yank path", LeaderAction::YankPath),
-            LeaderCommand::action('i', "toggle inactive (Tab)", LeaderAction::ToggleInactive),
             LeaderCommand::action('D', "dangerous mode", LeaderAction::ToggleDangerous),
         ]
     }
