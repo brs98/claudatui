@@ -139,6 +139,7 @@ impl<'a> StatefulWidget for Sidebar<'a> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_list_items(
     groups: &[ConversationGroup],
     collapsed: &std::collections::HashSet<String>,
@@ -315,11 +316,7 @@ fn build_list_items(
 fn format_relative_line_number(index: usize, selected: Option<usize>) -> String {
     match selected {
         Some(sel) => {
-            let distance = if index >= sel {
-                index - sel
-            } else {
-                sel - index
-            };
+            let distance = index.abs_diff(sel);
             format!("{:2} ", distance)
         }
         None => "   ".to_string(),

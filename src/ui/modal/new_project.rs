@@ -34,6 +34,12 @@ pub struct NewProjectModalState {
     pub error_message: Option<String>,
 }
 
+impl Default for NewProjectModalState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NewProjectModalState {
     /// Create a new modal state starting at the home directory
     pub fn new() -> Self {

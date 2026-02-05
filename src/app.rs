@@ -28,7 +28,7 @@ pub enum ModalState {
     /// No modal is open
     None,
     /// New project modal is open
-    NewProject(NewProjectModalState),
+    NewProject(Box<NewProjectModalState>),
 }
 
 /// Which pane is currently focused
@@ -819,7 +819,7 @@ impl App {
     /// Scroll up by the specified number of lines (active session only)
     pub fn scroll_up(&mut self, lines: usize) {
         if let Some(ref session_id) = self.active_session_id.clone() {
-            if let Some(session) = self.session_manager.get_session_mut(&session_id) {
+            if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_up(lines);
             }
         }
@@ -828,7 +828,7 @@ impl App {
     /// Scroll down by the specified number of lines (active session only)
     pub fn scroll_down(&mut self, lines: usize) {
         if let Some(ref session_id) = self.active_session_id.clone() {
-            if let Some(session) = self.session_manager.get_session_mut(&session_id) {
+            if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_down(lines);
             }
         }
@@ -837,7 +837,7 @@ impl App {
     /// Jump to the bottom (live view) for active session
     pub fn scroll_to_bottom(&mut self) {
         if let Some(ref session_id) = self.active_session_id.clone() {
-            if let Some(session) = self.session_manager.get_session_mut(&session_id) {
+            if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_to_bottom();
             }
         }
@@ -854,7 +854,7 @@ impl App {
     /// Write input to active session's PTY
     pub fn write_to_pty(&mut self, data: &[u8]) -> Result<()> {
         if let Some(ref session_id) = self.active_session_id.clone() {
-            if let Some(session) = self.session_manager.get_session_mut(&session_id) {
+            if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.write(data)?;
             }
         }
@@ -977,12 +977,10 @@ impl App {
                 should_reload = true;
             }
 
-            if should_reload {
-                if self.load_conversations_preserve_order().is_ok() {
-                    self.cleanup_persisted_ephemeral_sessions();
-                    self.last_refresh = Some(Instant::now());
-                    self.last_refresh_was_auto = true;
-                }
+            if should_reload && self.load_conversations_preserve_order().is_ok() {
+                self.cleanup_persisted_ephemeral_sessions();
+                self.last_refresh = Some(Instant::now());
+                self.last_refresh_was_auto = true;
             }
         }
     }
@@ -1238,7 +1236,7 @@ impl App {
 
     /// Open the new project modal dialog
     pub fn open_new_project_modal(&mut self) {
-        self.modal_state = ModalState::NewProject(NewProjectModalState::new());
+        self.modal_state = ModalState::NewProject(Box::default());
     }
 
     /// Close any open modal dialog

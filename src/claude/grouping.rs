@@ -184,7 +184,7 @@ pub fn group_conversations_unordered(conversations: Vec<Conversation>) -> Vec<Co
 }
 
 /// Sort groups by most recent conversation (for initial/manual refresh)
-pub fn sort_groups_by_recency(groups: &mut Vec<ConversationGroup>) {
+pub fn sort_groups_by_recency(groups: &mut [ConversationGroup]) {
     groups.sort_by(|a, b| {
         let a_time = a
             .conversations()

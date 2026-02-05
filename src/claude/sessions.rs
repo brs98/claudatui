@@ -270,11 +270,7 @@ fn load_index_cache(project_dir: &Path) -> HashMap<String, SessionEntryRaw> {
 /// `/Users/brandon/work/fluid-mono-with-backend` if that path exists
 fn extract_project_path(dir_name: &str) -> String {
     // Remove leading dash if present (indicates absolute path starting with /)
-    let cleaned = if dir_name.starts_with('-') {
-        &dir_name[1..]
-    } else {
-        dir_name
-    };
+    let cleaned = dir_name.strip_prefix('-').unwrap_or(dir_name);
 
     // Split by hyphens (potential path separators)
     let segments: Vec<&str> = cleaned.split('-').collect();
