@@ -990,8 +990,19 @@ impl App {
                 .and_then(|g| g.project_path());
 
             if let Some(path) = project_path {
-                self.start_session(&path, None)?;
                 self.selected_conversation = None;
+                self.start_session(&path, None)?;
+
+                // Position sidebar cursor on the newly created ephemeral session
+                if let Some(ref new_sid) = self.active_session_id {
+                    let new_items = self.sidebar_items();
+                    if let Some(idx) = new_items.iter().position(|item| {
+                        matches!(item, SidebarItem::EphemeralSession { session_id, .. } if session_id == new_sid)
+                    }) {
+                        self.sidebar_state.list_state.select(Some(idx));
+                    }
+                }
+
                 self.focus = Focus::Terminal(TerminalPaneId::Primary);
                 self.enter_insert_mode();
             }
