@@ -203,11 +203,11 @@ fn handle_key_event(
             return Ok(KeyAction::Continue);
         }
         // Cycle between active projects (works from any pane)
-        (KeyCode::Char('.'), KeyModifiers::CONTROL) => {
+        (KeyCode::Char('.'), KeyModifiers::ALT) => {
             let _ = app.cycle_and_switch_to_active(true);
             return Ok(KeyAction::Continue);
         }
-        (KeyCode::Char(','), KeyModifiers::CONTROL) => {
+        (KeyCode::Char(','), KeyModifiers::ALT) => {
             let _ = app.cycle_and_switch_to_active(false);
             return Ok(KeyAction::Continue);
         }
@@ -540,23 +540,34 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
-    // Check for dangerous mode (highest priority warning)
-    if app.dangerous_mode {
-        let msg = Paragraph::new(Line::from(vec![
-            Span::styled(
-                " ⚠ DANGEROUS MODE ",
-                Style::default().fg(Color::Black).bg(Color::Red),
-            ),
-            Span::raw(" New sessions will skip permission prompts. Press "),
-            Span::styled("D", Style::default().fg(Color::Cyan)),
-            Span::raw(" to disable."),
-        ]))
-        .style(Style::default().bg(Color::DarkGray));
-        f.render_widget(msg, area);
-        return;
+    // Check for recent dangerous mode toggle (2 second temporary message)
+    if let Some(entering_dangerous) = app.recent_dangerous_mode_toggle(2000) {
+        if entering_dangerous {
+            let msg = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " DANGEROUS MODE ENABLED ",
+                    Style::default().fg(Color::Black).bg(Color::Red),
+                ),
+                Span::raw(" New sessions will skip permission prompts."),
+            ]))
+            .style(Style::default().bg(Color::DarkGray));
+            f.render_widget(msg, area);
+            return;
+        } else {
+            let msg = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " NORMAL MODE ",
+                    Style::default().fg(Color::Black).bg(Color::Green),
+                ),
+                Span::raw(" Dangerous mode disabled."),
+            ]))
+            .style(Style::default().bg(Color::DarkGray));
+            f.render_widget(msg, area);
+            return;
+        }
     }
 
-    // Check for pending chord sequence first (highest priority)
+    // Check for pending chord sequence (highest priority after temporary messages)
     if let Some(pending) = app.chord_state.pending_display() {
         let hint = match &app.chord_state {
             ChordState::DeletePending { .. } => {
@@ -617,7 +628,15 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
 
     let help_text = match app.focus {
         Focus::Sidebar => {
-            vec![
+            let mut spans = Vec::new();
+            // Add mode indicator at the start if dangerous mode is active
+            if app.dangerous_mode {
+                spans.push(Span::styled(
+                    " -- DANGEROUS -- ",
+                    Style::default().fg(Color::Black).bg(Color::Red),
+                ));
+            }
+            spans.extend(vec![
                 Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
                 Span::raw("nav "),
                 Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
@@ -628,13 +647,12 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
                 Span::raw("close "),
                 Span::styled(" y ", Style::default().fg(Color::Cyan)),
                 Span::raw("yank "),
-                Span::styled(" Space ", Style::default().fg(Color::Cyan)),
-                Span::raw("toggle "),
-                Span::styled(" a ", Style::default().fg(Color::Cyan)),
-                Span::raw("active "),
+                Span::styled(" D ", Style::default().fg(Color::Cyan)),
+                Span::raw(if app.dangerous_mode { "safe " } else { "danger " }),
                 Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
                 Span::raw("quit"),
-            ]
+            ]);
+            spans
         }
         Focus::Terminal => {
             vec![

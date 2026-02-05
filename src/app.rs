@@ -115,6 +115,8 @@ pub struct App {
     group_order: Vec<String>,
     /// Dangerous mode: when true, new sessions are started with --dangerously-skip-permissions
     pub dangerous_mode: bool,
+    /// Timestamp when dangerous mode was last toggled (for temporary message display)
+    pub dangerous_mode_toggled_at: Option<Instant>,
     /// Current modal state
     pub modal_state: ModalState,
 }
@@ -150,6 +152,7 @@ impl App {
             clipboard_status: ClipboardStatus::None,
             group_order: Vec::new(),
             dangerous_mode: false,
+            dangerous_mode_toggled_at: None,
             modal_state: ModalState::None,
         };
 
@@ -1217,6 +1220,20 @@ impl App {
     /// Toggle dangerous mode on/off
     pub fn toggle_dangerous_mode(&mut self) {
         self.dangerous_mode = !self.dangerous_mode;
+        self.dangerous_mode_toggled_at = Some(Instant::now());
+    }
+
+    /// Check if dangerous mode was recently toggled (for temporary message display)
+    /// Returns Some(true) if entering dangerous, Some(false) if exiting, None if not recent
+    pub fn recent_dangerous_mode_toggle(&self, within_ms: u64) -> Option<bool> {
+        self.dangerous_mode_toggled_at.and_then(|t| {
+            let elapsed = t.elapsed().as_millis() as u64;
+            if elapsed < within_ms {
+                Some(self.dangerous_mode)
+            } else {
+                None
+            }
+        })
     }
 
     /// Check if clipboard copy happened recently (for UI feedback)
