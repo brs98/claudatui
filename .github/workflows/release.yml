@@ -47,14 +47,11 @@ jobs:
             archive: tar.gz
             cross: true
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
             archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -81,25 +78,17 @@ jobs:
         shell: bash
         run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Package (Unix)
-        if: matrix.archive == 'tar.gz'
+      - name: Package
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           tar -czvf ../../../claudatui-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz claudatui
 
-      - name: Package (Windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path claudatui.exe -DestinationPath ../../../claudatui-${{ steps.version.outputs.version }}-${{ matrix.target }}.zip
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: claudatui-${{ matrix.target }}
-          path: claudatui-${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
+          path: claudatui-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz
 
   # Create GitHub Release
   release:
