@@ -290,13 +290,31 @@ fn handle_leader_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
         }
     };
 
-    // Get the current path from leader state
-    let path = if let InputMode::Leader(ref state) = app.input_mode {
-        state.path.clone()
+    // Get the current path and pending escape state from leader state
+    let (path, pending_escape) = if let InputMode::Leader(ref state) = app.input_mode {
+        (state.path.clone(), state.pending_escape)
     } else {
         // Shouldn't happen, but handle gracefully
         return Ok(KeyAction::Continue);
     };
+
+    // Check if this key completes a jk/kj escape sequence
+    if let Some((first_key, started_at)) = pending_escape {
+        let is_complement = matches!(
+            (first_key, c),
+            ('j', 'k') | ('k', 'j')
+        );
+        if is_complement
+            && started_at.elapsed().as_millis() as u64 <= crate::app::ESCAPE_SEQ_TIMEOUT_MS
+        {
+            app.exit_leader_mode();
+            return Ok(KeyAction::Continue);
+        }
+        // Not a valid escape sequence — clear pending and fall through to process_key
+        if let InputMode::Leader(ref mut state) = app.input_mode {
+            state.pending_escape = None;
+        }
+    }
 
     // Process the key through the which-key config
     match app.which_key_config.process_key(&path, c) {
@@ -307,12 +325,20 @@ fn handle_leader_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
         LeaderKeyResult::Submenu => {
             // Navigate into submenu by adding key to path
             if let InputMode::Leader(ref mut state) = app.input_mode {
+                state.pending_escape = None;
                 state.push(c);
             }
         }
         LeaderKeyResult::Cancel => {
-            // Invalid key - cancel leader mode
-            app.exit_leader_mode();
+            // If j or k, buffer as potential escape sequence start
+            if c == 'j' || c == 'k' {
+                if let InputMode::Leader(ref mut state) = app.input_mode {
+                    state.pending_escape = Some((c, std::time::Instant::now()));
+                }
+            } else {
+                // Other invalid keys cancel leader mode immediately
+                app.exit_leader_mode();
+            }
         }
     }
 
@@ -706,9 +732,9 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
             handle_sidebar_enter(app)?;
         }
 
-        // 'a' adds new conversation in selected group (opens the group)
+        // 'a' adds new conversation in selected group
         KeyCode::Char('a') => {
-            app.open_selected()?;
+            app.new_conversation_in_selected_group()?;
         }
 
         // 'i' toggles hide inactive (was 'a')
@@ -727,8 +753,9 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
         }
 
         KeyCode::Esc => {
-            // Cancel any pending chord
+            // Cancel any pending chord and clear preview
             app.chord_state = ChordState::None;
+            app.clear_preview();
         }
 
         // Project cycling
@@ -751,6 +778,11 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
             let _ = app.unarchive_selected_conversation();
         }
 
+        // Preview: show session in terminal pane without leaving sidebar
+        KeyCode::Char('p') => {
+            let _ = app.preview_selected();
+        }
+
         _ => {}
     }
     Ok(KeyAction::Continue)
@@ -768,8 +800,11 @@ fn handle_sidebar_enter(app: &mut App) -> Result<()> {
             // Toggle expand/collapse on group headers
             app.toggle_current_group();
         }
+        Some(SidebarItem::BookmarkHeader) | Some(SidebarItem::BookmarkSeparator) => {
+            // Non-interactive items — no-op
+        }
         _ => {
-            // Open conversation/ephemeral session, or handle other items
+            // Open conversation/ephemeral session, bookmark entry, or handle other items
             app.open_selected()?;
         }
     }
@@ -885,7 +920,8 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
 
     // Draw terminal pane with session state from daemon
     let session_state = app.get_session_state();
-    let terminal_pane = TerminalPane::new(session_state, matches!(app.focus, Focus::Terminal(_)));
+    let is_preview = app.preview_session_id.is_some() && app.focus == Focus::Sidebar;
+    let terminal_pane = TerminalPane::new(session_state, matches!(app.focus, Focus::Terminal(_)), is_preview);
     f.render_widget(terminal_pane, terminal_area);
 
     // Draw help bar or hot reload status
