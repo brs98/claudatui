@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use crossterm::{
     event::{
         poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
-        KeyModifiers, MouseEvent, MouseEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -27,7 +27,7 @@ use ratatui::{
 
 use claudatui::input::InputMode;
 use claudatui::input::which_key::{LeaderAction, LeaderKeyResult};
-use app::{App, ChordState, EscapeSequenceState, Focus, ModalState, TerminalPaneId};
+use app::{App, ChordState, EscapeSequenceState, Focus, ModalState, TerminalPosition, TextSelection};
 use ui::layout::create_layout_with_help_config;
 use ui::modal::{NewProjectModal, SearchKeyResult, SearchModal};
 use ui::sidebar::Sidebar;
@@ -194,6 +194,12 @@ fn handle_key_event(
         *hot_reload_status = HotReloadStatus::None;
     }
 
+    // 0. If there's an active text selection, clear it on any keypress
+    // (Selection auto-copies on mouse release, so no special handling needed)
+    if app.text_selection.is_some() {
+        app.clear_selection();
+    }
+
     // 1. Insert mode - handle modal or terminal passthrough with jk/kj escape detection
     if matches!(app.input_mode, InputMode::Insert) {
         if app.is_modal_open() {
@@ -221,11 +227,11 @@ fn handle_key_event(
             return Ok(KeyAction::HotReload);
         }
         (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
-            app.set_focus(Focus::Sidebar);
+            app.exit_insert_mode();
             return Ok(KeyAction::Continue);
         }
         (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
-            app.set_focus(Focus::Terminal(TerminalPaneId::Primary));
+            app.enter_insert_mode();
             return Ok(KeyAction::Continue);
         }
         // Cycle between active projects (works from any pane)
@@ -265,11 +271,8 @@ fn handle_key_event(
         _ => {}
     }
 
-    // 4. Normal mode - focus-specific keybindings
-    match app.focus {
-        Focus::Sidebar => handle_sidebar_key_normal(app, key),
-        Focus::Terminal(_) => handle_terminal_key_normal(app, key),
-    }
+    // 4. Normal mode - always sidebar (Normal mode = Sidebar focus)
+    handle_sidebar_key_normal(app, key)
 }
 
 /// Handle key input in leader mode (works in both sidebar and terminal)
@@ -591,57 +594,6 @@ fn flush_buffered_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-/// Handle terminal input in Normal mode (navigation, scroll, leader access)
-fn handle_terminal_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
-    let page_size = app.get_page_size();
-    let is_scroll_locked = app.is_scroll_locked();
-
-    match (key.code, key.modifiers) {
-        // Navigation
-        (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
-            app.scroll_down(1);
-        }
-        (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
-            app.scroll_up(1);
-        }
-        (KeyCode::Char('G'), KeyModifiers::SHIFT) => {
-            app.scroll_to_bottom();
-        }
-        (KeyCode::Char('g'), KeyModifiers::NONE) => {
-            // Scroll to top (like vim gg, but single g for simplicity)
-            if let Some(ref session_id) = app.active_session_id.clone() {
-                if let Some(session) = app.session_manager.get_session_mut(session_id) {
-                    session.scroll_to_top();
-                }
-            }
-        }
-        (KeyCode::PageUp, _) => {
-            app.scroll_up(page_size);
-        }
-        (KeyCode::PageDown, _) => {
-            app.scroll_down(page_size);
-        }
-        // Escape returns to bottom if scroll locked
-        (KeyCode::Esc, _) if is_scroll_locked => {
-            app.scroll_to_bottom();
-        }
-        // Leader key - full access to all commands
-        (KeyCode::Char(' '), KeyModifiers::NONE) => {
-            app.enter_leader_mode();
-        }
-        // Focus switching
-        (KeyCode::Char('h'), KeyModifiers::NONE) => {
-            app.set_focus(Focus::Sidebar);
-        }
-        // 'i' enters insert mode (like vim)
-        (KeyCode::Char('i'), KeyModifiers::NONE) => {
-            app.enter_insert_mode();
-        }
-        _ => {}
-    }
-    Ok(KeyAction::Continue)
-}
-
 fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
     // Handle chord sequences first
     match &app.chord_state {
@@ -749,9 +701,9 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
             app.clear_preview();
         }
 
-        // Focus terminal (mirrors 'h' in terminal mode for sidebar)
+        // Enter insert mode and focus terminal
         KeyCode::Char('l') => {
-            app.set_focus(Focus::Terminal(TerminalPaneId::Primary));
+            app.enter_insert_mode();
         }
 
         // Quick access actions (also available via leader)
@@ -799,19 +751,90 @@ fn handle_sidebar_enter(app: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
-    // Only handle mouse scroll when terminal is focused
-    if !matches!(app.focus, Focus::Terminal(_)) {
-        return;
+/// Map absolute screen coordinates to terminal content coordinates.
+/// Returns None if the position is outside the terminal inner area.
+fn screen_to_terminal_pos(app: &App, col: u16, row: u16) -> Option<TerminalPosition> {
+    let inner = app.terminal_inner_area?;
+    if col < inner.x || col >= inner.x + inner.width || row < inner.y || row >= inner.y + inner.height {
+        return None;
     }
+    let t_col = (col - inner.x) as usize;
+    let t_row = (row - inner.y) as usize;
 
+    // Clamp to actual screen state bounds
+    if let Some(ref state) = app.session_state_cache {
+        let max_row = state.screen.rows.len().saturating_sub(1);
+        let max_col = state.screen.rows.first().map_or(0, |r| r.cells.len().saturating_sub(1));
+        Some(TerminalPosition {
+            row: t_row.min(max_row),
+            col: t_col.min(max_col),
+        })
+    } else {
+        Some(TerminalPosition { row: t_row, col: t_col })
+    }
+}
+
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
     const SCROLL_LINES: usize = 3;
 
     match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            // Start a new selection if click is inside terminal pane
+            // Do NOT change focus or input mode — mouse selection is overlay-only
+            if let Some(pos) = screen_to_terminal_pos(app, mouse.column, mouse.row) {
+                app.text_selection = Some(TextSelection {
+                    anchor: pos,
+                    cursor: pos,
+                });
+            } else {
+                // Click outside terminal — clear selection
+                app.clear_selection();
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if app.text_selection.is_some() {
+                if let Some(inner) = app.terminal_inner_area {
+                    // Compute new cursor position before mutating selection
+                    let clamped_col = mouse.column.max(inner.x).min(inner.x + inner.width - 1);
+                    let clamped_row = mouse.row.max(inner.y).min(inner.y + inner.height - 1);
+                    let new_pos = screen_to_terminal_pos(app, clamped_col, clamped_row);
+
+                    if let (Some(ref mut sel), Some(pos)) = (&mut app.text_selection, new_pos) {
+                        sel.cursor = pos;
+                    }
+
+                    // Auto-scroll when dragging above or below terminal area
+                    if mouse.row < inner.y {
+                        if let Some(ref session_id) = app.active_session_id.clone() {
+                            if let Some(session) = app.session_manager.get_session_mut(session_id) {
+                                session.scroll_up(1);
+                            }
+                        }
+                    } else if mouse.row >= inner.y + inner.height {
+                        if let Some(ref session_id) = app.active_session_id.clone() {
+                            if let Some(session) = app.session_manager.get_session_mut(session_id) {
+                                session.scroll_down(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            // On release: if there's a real selection, copy to clipboard and clear immediately
+            if let Some(ref sel) = app.text_selection {
+                if !sel.is_empty() {
+                    app.copy_selection_to_clipboard();
+                }
+            }
+            app.clear_selection();
+        }
         MouseEventKind::ScrollUp => {
+            app.clear_selection();
             app.scroll_up(SCROLL_LINES);
         }
         MouseEventKind::ScrollDown => {
+            app.clear_selection();
             app.scroll_down(SCROLL_LINES);
         }
         _ => {}
@@ -906,10 +929,20 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
     );
     f.render_stateful_widget(sidebar, sidebar_area, &mut app.sidebar_state);
 
+    // Cache terminal inner area for mouse coordinate mapping (area minus 1px border)
+    let terminal_inner = Rect {
+        x: terminal_area.x + 1,
+        y: terminal_area.y + 1,
+        width: terminal_area.width.saturating_sub(2),
+        height: terminal_area.height.saturating_sub(2),
+    };
+    app.terminal_inner_area = Some(terminal_inner);
+
     // Draw terminal pane with session state from daemon
     let session_state = app.get_session_state();
     let is_preview = app.preview_session_id.is_some() && app.focus == Focus::Sidebar;
-    let terminal_pane = TerminalPane::new(session_state, matches!(app.focus, Focus::Terminal(_)), is_preview);
+    let selection = app.text_selection.as_ref();
+    let terminal_pane = TerminalPane::new(session_state, matches!(app.focus, Focus::Terminal(_)), is_preview, selection);
     f.render_widget(terminal_pane, terminal_area);
 
     // Draw help bar or hot reload status
@@ -1068,12 +1101,14 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
     let help_text = match app.focus {
         Focus::Sidebar => {
             let mut spans = vec![mode_indicator];
-            if let Some(danger) = dangerous_indicator.clone() {
+            if let Some(danger) = dangerous_indicator {
                 spans.push(danger);
             }
             spans.extend(vec![
                 Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
                 Span::raw("nav "),
+                Span::styled(" l ", Style::default().fg(Color::Cyan)),
+                Span::raw("terminal "),
                 Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
                 Span::raw("open "),
                 Span::styled(" SPC ", Style::default().fg(Color::Cyan)),
@@ -1088,34 +1123,19 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             spans
         }
         Focus::Terminal(_) => {
+            // Terminal focus = Insert mode (Normal+Terminal is not reachable)
             let mut spans = vec![mode_indicator];
             if let Some(danger) = dangerous_indicator {
                 spans.push(danger);
             }
-            // Show different hints based on mode
-            if matches!(app.input_mode, InputMode::Insert) {
-                spans.extend(vec![
-                    Span::styled(" jk ", Style::default().fg(Color::Cyan)),
-                    Span::raw("normal "),
-                    Span::styled(" C-h ", Style::default().fg(Color::Cyan)),
-                    Span::raw("sidebar "),
-                    Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
-                    Span::raw("quit"),
-                ]);
-            } else {
-                spans.extend(vec![
-                    Span::styled(" i ", Style::default().fg(Color::Cyan)),
-                    Span::raw("insert "),
-                    Span::styled(" SPC ", Style::default().fg(Color::Cyan)),
-                    Span::raw("leader "),
-                    Span::styled(" h ", Style::default().fg(Color::Cyan)),
-                    Span::raw("sidebar "),
-                    Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
-                    Span::raw("scroll "),
-                    Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
-                    Span::raw("quit"),
-                ]);
-            }
+            spans.extend(vec![
+                Span::styled(" jk ", Style::default().fg(Color::Cyan)),
+                Span::raw("sidebar "),
+                Span::styled(" C-h ", Style::default().fg(Color::Cyan)),
+                Span::raw("sidebar "),
+                Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
+                Span::raw("quit"),
+            ]);
             spans
         }
     };

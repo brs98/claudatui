@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
+use crate::app::TextSelection;
 use crate::session::{CellAttrs, ScreenState, SessionState, TermColor};
 
 /// Terminal pane widget for displaying PTY output from daemon.
@@ -12,14 +13,21 @@ pub struct TerminalPane<'a> {
     session_state: Option<&'a SessionState>,
     focused: bool,
     preview: bool,
+    selection: Option<&'a TextSelection>,
 }
 
 impl<'a> TerminalPane<'a> {
-    pub fn new(session_state: Option<&'a SessionState>, focused: bool, preview: bool) -> Self {
+    pub fn new(
+        session_state: Option<&'a SessionState>,
+        focused: bool,
+        preview: bool,
+        selection: Option<&'a TextSelection>,
+    ) -> Self {
         Self {
             session_state,
             focused,
             preview,
+            selection,
         }
     }
 }
@@ -58,7 +66,7 @@ impl<'a> Widget for TerminalPane<'a> {
 
         match self.session_state {
             Some(state) => {
-                render_screen_state(&state.screen, inner_area, buf, state.scroll_offset);
+                render_screen_state(&state.screen, inner_area, buf, state.scroll_offset, self.selection);
             }
             None => {
                 // Show placeholder when no PTY is active
@@ -74,8 +82,14 @@ impl<'a> Widget for TerminalPane<'a> {
     }
 }
 
-fn render_screen_state(screen: &ScreenState, area: Rect, buf: &mut Buffer, scroll_offset: usize) {
-    let _rows = screen.rows.len() as u16;
+fn render_screen_state(
+    screen: &ScreenState,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll_offset: usize,
+    selection: Option<&TextSelection>,
+) {
+    let has_selection = selection.is_some();
 
     for (row_idx, screen_row) in screen.rows.iter().enumerate() {
         if row_idx as u16 >= area.height {
@@ -89,15 +103,26 @@ fn render_screen_state(screen: &ScreenState, area: Rect, buf: &mut Buffer, scrol
             }
             let x = area.x + col_idx as u16;
 
+            let is_selected = selection.map_or(false, |sel| sel.contains(row_idx, col_idx));
+
             if !cell.contents.is_empty() {
-                let style = convert_cell_style(&cell.fg, &cell.bg, &cell.attrs);
+                let mut style = convert_cell_style(&cell.fg, &cell.bg, &cell.attrs);
+                if is_selected {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
                 buf.set_string(x, y, &cell.contents, style);
+            } else if is_selected {
+                // Empty selected cell: show visible highlight
+                if let Some(buf_cell) = buf.cell_mut((x, y)) {
+                    buf_cell.set_char(' ');
+                    buf_cell.set_style(Style::default().bg(Color::White).fg(Color::Black));
+                }
             }
         }
     }
 
-    // Only render cursor when at live view (not scrolled)
-    if scroll_offset == 0 && screen.cursor_visible {
+    // Only render cursor when at live view (not scrolled) and no selection active
+    if scroll_offset == 0 && screen.cursor_visible && !has_selection {
         let (cursor_row, cursor_col) = screen.cursor;
         let cursor_x = area.x + cursor_col;
         let cursor_y = area.y + cursor_row;

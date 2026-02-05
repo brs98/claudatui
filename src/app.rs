@@ -19,7 +19,7 @@ use crate::claude::grouping::{
 };
 use crate::claude::sessions::{parse_all_sessions, SessionEntry};
 use crate::claude::SessionsWatcher;
-use crate::session::{SessionManager, SessionState};
+use crate::session::{ScreenState, SessionManager, SessionState};
 use crate::ui::modal::{NewProjectModalState, SearchModalState};
 use crate::ui::sidebar::{
     build_sidebar_items, group_has_active_content, SidebarItem, SidebarState,
@@ -1068,8 +1068,8 @@ impl App {
     /// Preview the selected sidebar item in the terminal pane without leaving the sidebar.
     ///
     /// Shows the session output in the terminal pane but keeps focus on the sidebar
-    /// and stays in normal mode. Toggle behavior: pressing `p` again on the same
-    /// conversation clears the preview.
+    /// and stays in normal mode. Pressing `p` again on the same conversation is a
+    /// no-op; use `clear_preview()` (Escape) to exit preview.
     pub fn preview_selected(&mut self) -> Result<()> {
         let items = self.sidebar_items();
         let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
@@ -1096,7 +1096,6 @@ impl App {
 
                     if let Some(ref sid) = existing_session {
                         if self.preview_session_id.as_ref() == Some(sid) {
-                            self.preview_session_id = None;
                             return Ok(());
                         }
                     }
@@ -1119,9 +1118,8 @@ impl App {
                 }
             }
             Some(SidebarItem::EphemeralSession { session_id, .. }) => {
-                // Toggle: if already previewing this session, clear preview
+                // Already previewing this session — no-op
                 if self.preview_session_id.as_ref() == Some(session_id) {
-                    self.preview_session_id = None;
                     return Ok(());
                 }
                 self.preview_session_id = Some(session_id.clone());
@@ -1216,6 +1214,13 @@ impl App {
             .as_ref()
             .or(self.active_session_id.as_ref());
 
+        // Clear selection if the displayed session changed
+        let old_session_id = self.session_state_cache.as_ref().map(|s| s.session_id.clone());
+        let new_session_id = display_session.cloned();
+        if old_session_id != new_session_id {
+            self.text_selection = None;
+        }
+
         if let Some(session_id) = display_session {
             self.session_state_cache = self.session_manager.get_session_state(session_id);
         } else {
@@ -1225,6 +1230,7 @@ impl App {
 
     /// Scroll up by the specified number of lines (active session only)
     pub fn scroll_up(&mut self, lines: usize) {
+        self.text_selection = None;
         if let Some(ref session_id) = self.active_session_id.clone() {
             if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_up(lines);
@@ -1234,6 +1240,7 @@ impl App {
 
     /// Scroll down by the specified number of lines (active session only)
     pub fn scroll_down(&mut self, lines: usize) {
+        self.text_selection = None;
         if let Some(ref session_id) = self.active_session_id.clone() {
             if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_down(lines);
@@ -1270,6 +1277,7 @@ impl App {
 
     /// Resize all running sessions
     pub fn resize(&mut self, width: u16, height: u16) -> Result<()> {
+        self.text_selection = None;
         self.term_size = (width, height);
 
         let (rows, cols) = self.calculate_terminal_dimensions();
@@ -1571,16 +1579,65 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
-    /// Enter insert mode
+    /// Enter insert mode and focus the terminal pane
     pub fn enter_insert_mode(&mut self) {
         self.input_mode = InputMode::Insert;
         self.escape_seq_state = EscapeSequenceState::None;
+        self.focus = Focus::Terminal(TerminalPaneId::Primary);
     }
 
-    /// Exit insert mode and return to normal
+    /// Exit insert mode, focus the sidebar, and sync sidebar cursor to active session
     pub fn exit_insert_mode(&mut self) {
         self.input_mode = InputMode::Normal;
         self.escape_seq_state = EscapeSequenceState::None;
+        self.focus = Focus::Sidebar;
+        self.select_sidebar_for_active_session();
+    }
+
+    /// Move the sidebar cursor to the item representing the currently active session.
+    ///
+    /// Called on exit_insert_mode() so the sidebar highlights the conversation
+    /// or ephemeral session you were just viewing in the terminal.
+    pub fn select_sidebar_for_active_session(&mut self) {
+        let active_id = match self.active_session_id.as_ref() {
+            Some(id) => id.clone(),
+            None => return,
+        };
+
+        let items = self.sidebar_items();
+
+        // Check ephemeral sessions first
+        if self.ephemeral_sessions.contains_key(&active_id) {
+            for (i, item) in items.iter().enumerate() {
+                if let SidebarItem::EphemeralSession { session_id, .. } = item {
+                    if *session_id == active_id {
+                        self.sidebar_state.list_state.select(Some(i));
+                        self.update_selected_conversation();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Check conversations via session_to_claude_id mapping
+        if let Some(Some(claude_id)) = self.session_to_claude_id.get(&active_id) {
+            for (i, item) in items.iter().enumerate() {
+                if let SidebarItem::Conversation { group_key, index } = item {
+                    // Look up the conversation to compare session_id
+                    for group in &self.groups {
+                        if &group.key() == group_key {
+                            if let Some(conv) = group.conversations().get(*index) {
+                                if conv.session_id == *claude_id {
+                                    self.sidebar_state.list_state.select(Some(i));
+                                    self.update_selected_conversation();
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Close a session by its ID, cleaning up all associated state
@@ -2348,6 +2405,46 @@ impl App {
             eprintln!("Failed to save config: {}", e);
         }
     }
+}
+
+/// Extract text from the screen state within a selection range.
+/// Trims trailing whitespace per line and joins with newlines.
+pub fn extract_selected_text(screen: &ScreenState, selection: &TextSelection) -> String {
+    let (start, end) = selection.ordered();
+    let mut lines: Vec<String> = Vec::new();
+
+    for row_idx in start.row..=end.row {
+        if row_idx >= screen.rows.len() {
+            break;
+        }
+        let row = &screen.rows[row_idx];
+        let col_start = if row_idx == start.row { start.col } else { 0 };
+        let col_end = if row_idx == end.row {
+            end.col
+        } else {
+            row.cells.len().saturating_sub(1)
+        };
+
+        let mut line = String::new();
+        for col_idx in col_start..=col_end {
+            if col_idx < row.cells.len() {
+                let cell = &row.cells[col_idx];
+                if cell.contents.is_empty() {
+                    line.push(' ');
+                } else {
+                    line.push_str(&cell.contents);
+                }
+            }
+        }
+        lines.push(line.trim_end().to_string());
+    }
+
+    // Remove trailing empty lines
+    while lines.last().map_or(false, |l| l.is_empty()) {
+        lines.pop();
+    }
+
+    lines.join("\n")
 }
 
 /// Chord state timeout duration (500ms)
