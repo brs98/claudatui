@@ -8,7 +8,7 @@ use crate::search::types::{SearchFilterType, SearchQuery, SearchResult};
 /// Search engine for finding conversations.
 pub struct SearchEngine {
     /// Path to ~/.claude directory
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "planned for future use")]
     claude_dir: PathBuf,
 }
 
@@ -112,7 +112,7 @@ impl SearchEngine {
 
     /// Create a snippet with the query highlighted (indicated by context).
     /// Uses character indices to handle UTF-8 safely.
-    fn create_snippet(&self, text: &str, query: &str) -> String {
+    pub(crate) fn create_snippet(&self, text: &str, query: &str) -> String {
         let text_lower = text.to_lowercase();
         let query_lower = query.to_lowercase();
 
@@ -149,5 +149,236 @@ impl SearchEngine {
                 text.to_string()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claude::conversation::{Conversation, ConversationStatus};
+
+    fn make_conversation(
+        session_id: &str,
+        display: &str,
+        summary: Option<&str>,
+        project_path: &str,
+    ) -> Conversation {
+        Conversation {
+            session_id: session_id.to_string(),
+            display: display.to_string(),
+            summary: summary.map(ToString::to_string),
+            timestamp: 1000,
+            modified: "2026-01-01T00:00:00Z".to_string(),
+            project_path: PathBuf::from(project_path),
+            status: ConversationStatus::Idle,
+            message_count: 1,
+            git_branch: None,
+            is_plan_implementation: false,
+            is_archived: false,
+            archived_at: None,
+        }
+    }
+
+    fn make_group(conversations: Vec<Conversation>) -> ConversationGroup {
+        ConversationGroup::Directory {
+            parent: "personal".to_string(),
+            project: "test-project".to_string(),
+            conversations,
+        }
+    }
+
+    #[test]
+    fn search_content_matches_display_text_case_insensitively() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let conv = make_conversation("s1", "Fix the Login Bug", None, "/projects/app");
+        let groups = vec![make_group(vec![conv])];
+
+        let results = engine.search_content("login bug", &groups);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].conversation.session_id, "s1");
+    }
+
+    #[test]
+    fn search_content_matches_summary_when_display_does_not_match() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let conv = make_conversation(
+            "s1",
+            "Some unrelated display text",
+            Some("Refactored the authentication module"),
+            "/projects/app",
+        );
+        let groups = vec![make_group(vec![conv])];
+
+        let results = engine.search_content("authentication", &groups);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].conversation.session_id, "s1");
+    }
+
+    #[test]
+    fn search_content_skips_archived_conversations() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let mut conv = make_conversation("s1", "Fix login bug", None, "/projects/app");
+        conv.is_archived = true;
+        let groups = vec![make_group(vec![conv])];
+
+        let results = engine.search_content("login", &groups);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_content_returns_empty_for_no_match() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let conv = make_conversation("s1", "Fix login bug", None, "/projects/app");
+        let groups = vec![make_group(vec![conv])];
+
+        let results = engine.search_content("database migration", &groups);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_project_matches_project_paths_case_insensitively() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let conv = make_conversation("s1", "Some task", None, "/Users/brandon/MyProject");
+        let groups = vec![ConversationGroup::Directory {
+            parent: "brandon".to_string(),
+            project: "MyProject".to_string(),
+            conversations: vec![conv],
+        }];
+
+        let results = engine.search_project("myproject", &groups);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_project_skips_archived_conversations() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let mut conv = make_conversation("s1", "Some task", None, "/Users/brandon/MyProject");
+        conv.is_archived = true;
+        let groups = vec![ConversationGroup::Directory {
+            parent: "brandon".to_string(),
+            project: "MyProject".to_string(),
+            conversations: vec![conv],
+        }];
+
+        let results = engine.search_project("myproject", &groups);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn create_snippet_extracts_context_around_match() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let text = "This is a long text that contains the word authentication somewhere in the middle of it all";
+        let snippet = engine.create_snippet(text, "authentication");
+        assert!(snippet.contains("authentication"));
+    }
+
+    #[test]
+    fn create_snippet_handles_utf8_text() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let text = "Hllo wrld with mji and special chars";
+        let snippet = engine.create_snippet(text, "mji");
+        assert!(snippet.contains("mji"));
+    }
+
+    #[test]
+    fn create_snippet_adds_ellipsis_for_long_text() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let text = "a".repeat(100) + "target" + &"b".repeat(100);
+        let snippet = engine.create_snippet(&text, "target");
+        assert!(snippet.contains("..."));
+        assert!(snippet.contains("target"));
+    }
+
+    #[test]
+    fn create_snippet_truncates_when_no_match_found() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let text = "a".repeat(100);
+        let snippet = engine.create_snippet(&text, "xyz");
+        assert!(snippet.ends_with("..."));
+        // 60 chars + "..." = 63
+        assert_eq!(snippet.len(), 63);
+    }
+
+    #[test]
+    fn create_snippet_returns_full_text_when_short_and_no_match() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let snippet = engine.create_snippet("short text", "xyz");
+        assert_eq!(snippet, "short text");
+    }
+
+    #[test]
+    fn search_returns_empty_for_empty_query() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let conv = make_conversation("s1", "Some task", None, "/projects/app");
+        let groups = vec![make_group(vec![conv])];
+
+        let query = SearchQuery::new("", SearchFilterType::All);
+        let results = engine.search(&query, &groups);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_with_whitespace_only_query_returns_empty() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let conv = make_conversation("s1", "Some task", None, "/projects/app");
+        let groups = vec![make_group(vec![conv])];
+
+        let query = SearchQuery::new("   ", SearchFilterType::All);
+        let results = engine.search(&query, &groups);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_all_deduplicates_results_from_content_and_project() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        // Display text also matches "myproject" - same as project path
+        let conv = make_conversation(
+            "s1",
+            "Working on myproject",
+            None,
+            "/Users/brandon/myproject",
+        );
+        let groups = vec![ConversationGroup::Directory {
+            parent: "brandon".to_string(),
+            project: "myproject".to_string(),
+            conversations: vec![conv],
+        }];
+
+        let query = SearchQuery::new("myproject", SearchFilterType::All);
+        let results = engine.search(&query, &groups);
+        // Should only appear once despite matching both content and project
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_content_filter_only_searches_display_and_summary() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let conv = make_conversation("s1", "Fix bug", None, "/Users/brandon/myproject");
+        let groups = vec![ConversationGroup::Directory {
+            parent: "brandon".to_string(),
+            project: "myproject".to_string(),
+            conversations: vec![conv],
+        }];
+
+        let query = SearchQuery::new("myproject", SearchFilterType::Content);
+        let results = engine.search(&query, &groups);
+        // "myproject" is only in the project path, not in display/summary
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_project_filter_only_searches_project_paths() {
+        let engine = SearchEngine::new(PathBuf::from("/tmp"));
+        let conv = make_conversation("s1", "Fix login bug", None, "/Users/brandon/app");
+        let groups = vec![ConversationGroup::Directory {
+            parent: "brandon".to_string(),
+            project: "app".to_string(),
+            conversations: vec![conv],
+        }];
+
+        let query = SearchQuery::new("login", SearchFilterType::Project);
+        let results = engine.search(&query, &groups);
+        // "login" is only in display, not in project path
+        assert!(results.is_empty());
     }
 }

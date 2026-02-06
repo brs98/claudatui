@@ -64,8 +64,8 @@ impl ConversationGroup {
             }
             Self::Ungrouped { path, .. } => path
                 .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string_lossy().to_string()),
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
         }
     }
 
@@ -129,7 +129,7 @@ fn extract_group_key(project_path: &str) -> GroupKey {
                 {
                     let branch = gitdir_path
                         .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
+                        .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     return GroupKey::Worktree {
                         repo_path: repo_root.to_path_buf(),
@@ -144,8 +144,8 @@ fn extract_group_key(project_path: &str) -> GroupKey {
     if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
         if let Some(parent_name) = parent.file_name() {
             return GroupKey::Directory {
-                parent: parent_name.to_string_lossy().to_string(),
-                project: name.to_string_lossy().to_string(),
+                parent: parent_name.to_string_lossy().into_owned(),
+                project: name.to_string_lossy().into_owned(),
             };
         }
     }
@@ -259,7 +259,7 @@ pub fn order_groups_by_keys(
     }
 
     // Build updated key order from result
-    let updated_order: Vec<String> = result.iter().map(|g| g.key()).collect();
+    let updated_order: Vec<String> = result.iter().map(ConversationGroup::key).collect();
 
     (result, updated_order)
 }
@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_worktree_group() {
+    fn extract_group_key_identifies_bare_worktree_from_dot_git_path() {
         let key = extract_group_key("/Users/brandon/work/repo.git/feature-branch");
         assert!(matches!(
             key,
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_directory_group() {
+    fn extract_group_key_parses_regular_directory_into_parent_and_project() {
         let key = extract_group_key("/Users/brandon/personal/myproject");
         assert!(matches!(
             key,
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_order_groups_by_keys_preserves_order() {
+    fn order_groups_by_keys_preserves_existing_group_order() {
         // Create conversations for different projects
         let convs = vec![
             make_conversation("/Users/brandon/personal/project-a", 100),
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(groups.len(), 3);
 
         // Capture the initial order
-        let key_order: Vec<String> = groups.iter().map(|g| g.key()).collect();
+        let key_order: Vec<String> = groups.iter().map(ConversationGroup::key).collect();
 
         // Create new conversations with updated timestamps
         // project-a now has the most recent activity
@@ -334,12 +334,12 @@ mod tests {
         let (ordered_groups, _) = order_groups_by_keys(new_groups, &key_order);
 
         // Order should be preserved (c, b, a) even though a has newer activity
-        let result_order: Vec<String> = ordered_groups.iter().map(|g| g.key()).collect();
+        let result_order: Vec<String> = ordered_groups.iter().map(ConversationGroup::key).collect();
         assert_eq!(result_order, key_order);
     }
 
     #[test]
-    fn test_order_groups_by_keys_new_groups_at_front() {
+    fn order_groups_by_keys_places_new_groups_at_front() {
         // Create conversations for two projects
         let convs = vec![
             make_conversation("/Users/brandon/personal/project-a", 100),
@@ -347,7 +347,7 @@ mod tests {
         ];
 
         let groups = group_conversations(convs);
-        let key_order: Vec<String> = groups.iter().map(|g| g.key()).collect();
+        let key_order: Vec<String> = groups.iter().map(ConversationGroup::key).collect();
 
         // Now add a new project
         let new_convs = vec![
@@ -372,7 +372,51 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_implementation_filtering() {
+    fn extract_group_key_returns_ungrouped_for_root_path() {
+        let key = extract_group_key("/");
+        assert!(matches!(key, GroupKey::Ungrouped { .. }));
+    }
+
+    #[test]
+    fn extract_group_key_returns_ungrouped_for_path_with_no_parent_name() {
+        // A path like "/singledir" has parent "/" which has no file_name
+        let key = extract_group_key("/singledir");
+        // Parent is "/" which has no file_name(), so falls through to Ungrouped
+        assert!(matches!(key, GroupKey::Ungrouped { .. }));
+    }
+
+    #[test]
+    fn display_name_handles_worktree_with_dot_git_suffix() {
+        let group = ConversationGroup::Worktree {
+            repo_path: PathBuf::from("/repos/myrepo.git"),
+            branch: "feature-branch".to_string(),
+            conversations: vec![],
+        };
+        assert_eq!(group.display_name(), "myrepo (feature-branch)");
+    }
+
+    #[test]
+    fn display_name_handles_worktree_without_dot_git_suffix() {
+        let group = ConversationGroup::Worktree {
+            repo_path: PathBuf::from("/repos/myrepo"),
+            branch: "main".to_string(),
+            conversations: vec![],
+        };
+        assert_eq!(group.display_name(), "myrepo (main)");
+    }
+
+    #[test]
+    fn project_path_returns_none_for_empty_group() {
+        let group = ConversationGroup::Directory {
+            parent: "personal".to_string(),
+            project: "empty".to_string(),
+            conversations: vec![],
+        };
+        assert!(group.project_path().is_none());
+    }
+
+    #[test]
+    fn plan_implementation_conversations_are_filterable_from_group() {
         // Create a mix of regular and plan implementation conversations
         let mut regular = make_conversation("/Users/brandon/personal/project-a", 100);
         regular.display = "Regular conversation".to_string();

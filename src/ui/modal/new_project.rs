@@ -1,6 +1,6 @@
 //! New Project modal dialog for starting conversations in arbitrary directories.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -50,7 +50,7 @@ impl NewProjectModalState {
         Self {
             active_tab: NewProjectTab::Browse,
             file_explorer,
-            path_input: home.to_string_lossy().to_string(),
+            path_input: home.to_string_lossy().into_owned(),
             cursor_pos: home.to_string_lossy().len(),
             error_message: None,
         }
@@ -89,7 +89,7 @@ impl NewProjectModalState {
 
                 // If it's a file, use its parent directory
                 let dir_path = if path.is_file() {
-                    path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
+                    path.parent().map(Path::to_path_buf).unwrap_or(path)
                 } else {
                     path
                 };

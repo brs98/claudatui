@@ -37,7 +37,7 @@ impl RepoInfo {
         let name = self
             .repo_path()
             .file_name()
-            .map(|n| n.to_string_lossy().to_string())
+            .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "repo".to_string());
         name.trim_end_matches(".git").to_string()
     }
@@ -89,7 +89,7 @@ pub fn detect_repo_info(project_path: &Path) -> Option<RepoInfo> {
                 {
                     let branch = gitdir_path
                         .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
+                        .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     return Some(RepoInfo::NormalRepoWorktree {
                         repo_path: repo_root.to_path_buf(),
@@ -110,7 +110,7 @@ pub fn detect_repo_info(project_path: &Path) -> Option<RepoInfo> {
         {
             let branch = project_path
                 .file_name()
-                .map(|n| n.to_string_lossy().to_string())
+                .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             return Some(RepoInfo::BareRepoWorktree {
                 repo_path: parent.to_path_buf(),
@@ -140,7 +140,7 @@ pub fn create_worktree(repo_info: &RepoInfo, branch_name: &str) -> Result<PathBu
         // e.g., /work/myrepo + branch "feat" → /work/myrepo-feat
         let repo_name = repo_path
             .file_name()
-            .map(|n| n.to_string_lossy().to_string())
+            .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "repo".to_string());
         repo_path
             .parent()

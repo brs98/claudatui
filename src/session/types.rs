@@ -131,7 +131,9 @@ pub fn screen_state_from_vt100(parser: &vt100::Parser, _scroll_offset: usize) ->
     for row_idx in 0..rows {
         let mut cells = Vec::with_capacity(cols as usize);
         for col_idx in 0..cols {
-            let cell = screen.cell(row_idx, col_idx).unwrap();
+            let Some(cell) = screen.cell(row_idx, col_idx) else {
+                continue;
+            };
             cells.push(ScreenCell {
                 contents: cell.contents().to_string(),
                 fg: TermColor::from_vt100(cell.fgcolor()),

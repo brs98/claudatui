@@ -176,7 +176,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_state() {
+    fn default_state_has_version_one_and_empty_sessions() {
         let state = ArchiveState::default();
         assert_eq!(state.version, 1);
         assert_eq!(state.auto_archive_days, Some(DEFAULT_AUTO_ARCHIVE_DAYS));
@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_unarchive() {
+    fn archive_then_unarchive_toggles_session_state() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut manager = ArchiveManager::new(temp_dir.path()).unwrap();
 
@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_archive_check() {
+    fn should_auto_archive_respects_day_threshold_and_disabled_state() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut manager = ArchiveManager::new(temp_dir.path()).unwrap();
 
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save_and_load() {
+    fn save_and_load_preserves_archive_entries_and_settings() {
         let temp_dir = tempfile::tempdir().unwrap();
 
         // Create and populate manager
@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_archived_at() {
+    fn get_archived_at_returns_timestamp_within_archive_window() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut manager = ArchiveManager::new(temp_dir.path()).unwrap();
 

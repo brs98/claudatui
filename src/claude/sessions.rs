@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 /// Parsed sessions-index.json file
 #[derive(Debug, Deserialize)]
 struct SessionsIndex {
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "deserialized from JSON")]
     version: u32,
     entries: Vec<SessionEntryRaw>,
 }
@@ -47,7 +47,6 @@ pub struct SessionEntry {
     pub first_prompt: String,
     pub summary: Option<String>,
     pub message_count: u32,
-    #[allow(dead_code)]
     pub created: String,
     pub modified: String,
     pub git_branch: Option<String>,
@@ -353,7 +352,7 @@ fn extract_project_path(dir_name: &str) -> String {
         }
     }
 
-    path.to_string_lossy().to_string()
+    path.to_string_lossy().into_owned()
 }
 
 /// Parse all sessions from ~/.claude/projects/*/
@@ -426,7 +425,7 @@ pub fn parse_all_sessions(claude_dir: &Path) -> Result<Vec<SessionEntry>> {
                 // Create entry with minimal metadata
                 all_entries.push(SessionEntry {
                     session_id,
-                    full_path: session_file.path.to_string_lossy().to_string(),
+                    full_path: session_file.path.to_string_lossy().into_owned(),
                     file_mtime: session_file.file_mtime,
                     first_prompt,
                     summary: None,
@@ -450,32 +449,12 @@ pub fn parse_all_sessions(claude_dir: &Path) -> Result<Vec<SessionEntry>> {
     Ok(all_entries)
 }
 
-/// Parse a single sessions-index.json file (kept for potential future use)
-#[allow(dead_code)]
-fn parse_sessions_index(path: &Path) -> Result<Vec<SessionEntry>> {
-    let file = File::open(path).with_context(|| format!("Failed to open: {:?}", path))?;
-
-    let reader = BufReader::new(file);
-    let index: SessionsIndex =
-        serde_json::from_reader(reader).with_context(|| format!("Failed to parse: {:?}", path))?;
-
-    // Filter out sidechain sessions and convert to SessionEntry
-    let entries: Vec<SessionEntry> = index
-        .entries
-        .into_iter()
-        .filter(|e| !e.is_sidechain)
-        .map(SessionEntry::from)
-        .collect();
-
-    Ok(entries)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_empty_git_branch_becomes_none() {
+    fn empty_git_branch_string_converts_to_none() {
         let raw = SessionEntryRaw {
             session_id: "test".to_string(),
             full_path: "/path/to/test.jsonl".to_string(),
@@ -495,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_uuid() {
+    fn is_uuid_accepts_valid_and_rejects_invalid_formats() {
         // Valid UUIDs
         assert!(is_uuid("d90ed21d-ed03-4e94-87d7-dbc5de6cc828"));
         assert!(is_uuid("00000000-0000-0000-0000-000000000000"));
@@ -512,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_project_path_simple() {
+    fn extract_project_path_converts_simple_escaped_path() {
         // Test paths without hyphens in directory names
         // These should work regardless of filesystem state since each segment
         // either exists or is the final segment
@@ -521,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_project_path_uses_filesystem() {
+    fn extract_project_path_resolves_hyphenated_dirs_via_filesystem() {
         // The function validates against the filesystem, so we test with paths
         // that we know exist. /tmp should exist on most Unix systems.
         use std::fs;
@@ -540,14 +519,14 @@ mod tests {
         let full_escaped = format!("{}-my-hyphenated-project", escaped);
         let result = extract_project_path(&full_escaped);
 
-        assert_eq!(result, test_dir.to_string_lossy().to_string());
+        assert_eq!(result, test_dir.to_string_lossy().into_owned());
 
         // Clean up
         let _ = fs::remove_dir_all(&test_base);
     }
 
     #[test]
-    fn test_extract_project_path_nonexistent_fallback() {
+    fn extract_project_path_falls_back_for_nonexistent_dirs() {
         // When the path doesn't exist, it should still produce a reasonable result
         // by treating remaining segments as individual directories
         let result = extract_project_path("-nonexistent-path-here");
@@ -556,14 +535,14 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_project_path_empty() {
+    fn extract_project_path_returns_root_for_empty_input() {
         // Empty input results in root path since we start with "/"
         assert_eq!(extract_project_path(""), "/");
         assert_eq!(extract_project_path("-"), "/");
     }
 
     #[test]
-    fn test_extract_project_path_hidden_dir() {
+    fn extract_project_path_handles_hidden_dot_directories() {
         // Test hidden directories (dot-prefixed) which are escaped as double-hyphen
         // e.g., .dotfiles -> -dotfiles in the escaped form, resulting in -- after /
         use std::fs;
@@ -581,14 +560,14 @@ mod tests {
         let full_escaped = format!("{}--my-hidden-dir", escaped_base);
 
         let result = extract_project_path(&full_escaped);
-        assert_eq!(result, hidden_dir.to_string_lossy().to_string());
+        assert_eq!(result, hidden_dir.to_string_lossy().into_owned());
 
         // Clean up
         let _ = fs::remove_dir_all(&test_base);
     }
 
     #[test]
-    fn test_truncate_prompt() {
+    fn truncate_prompt_trims_and_caps_long_text_with_ellipsis() {
         // Short text should not be truncated
         assert_eq!(truncate_prompt("Hello world"), "Hello world");
         assert_eq!(truncate_prompt("  Hello world  "), "Hello world");

@@ -2,17 +2,6 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::config::{LayoutConfig, SidebarPosition};
 
-/// Create the main split-pane layout (25% sidebar, 75% terminal)
-#[allow(dead_code)]
-pub fn create_layout(area: Rect) -> [Rect; 2] {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-        .split(area);
-
-    [chunks[0], chunks[1]]
-}
-
 /// Create layout with help bar at the bottom using config
 pub fn create_layout_with_help(area: Rect) -> (Rect, Rect, Rect) {
     // Use default layout config for backwards compatibility

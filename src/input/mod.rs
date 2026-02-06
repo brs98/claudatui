@@ -75,7 +75,7 @@ impl LeaderState {
                 "SPC {}",
                 self.path
                     .iter()
-                    .map(|c| c.to_string())
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(" ")
             )
@@ -104,7 +104,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_input_mode_display_names() {
+    fn display_name_returns_correct_string_for_each_mode() {
         assert_eq!(InputMode::Normal.display_name(), "NORMAL");
         assert_eq!(InputMode::Insert.display_name(), "INSERT");
         assert_eq!(
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn test_leader_state_display_path() {
+    fn leader_state_display_path_builds_space_separated_keys() {
         let mut state = LeaderState::new();
         assert_eq!(state.display_path(), "SPC");
 
@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn test_input_mode_text_input() {
+    fn is_text_input_returns_true_only_for_insert_mode() {
         assert!(!InputMode::Normal.is_text_input());
         assert!(InputMode::Insert.is_text_input());
         assert!(!InputMode::Leader(LeaderState::new()).is_text_input());

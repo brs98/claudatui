@@ -32,7 +32,7 @@ use claudatui::input::which_key::{LeaderAction, LeaderKeyResult};
 use claudatui::input::InputMode;
 use ui::layout::create_layout_with_help_config;
 use ui::modal::{NewProjectModal, SearchKeyResult, SearchModal, WorktreeModal};
-use ui::sidebar::{FilterKeyResult, Sidebar};
+use ui::sidebar::{FilterKeyResult, Sidebar, SidebarContext};
 use ui::terminal_pane::TerminalPane;
 use ui::toast_widget::{ToastPosition, ToastWidget};
 use ui::WhichKeyWidget;
@@ -84,7 +84,6 @@ fn main() -> Result<()> {
             let c_path = CString::new(path.as_bytes()).expect("Invalid path");
             let args: [CString; 1] = [c_path.clone()];
             // execv never returns on success
-            #[allow(unreachable_code)]
             match nix::unistd::execv(&c_path, &args) {
                 Ok(infallible) => match infallible {},
                 Err(e) => anyhow::bail!("Failed to exec new binary: {}", e),
@@ -205,11 +204,11 @@ fn handle_key_event(
     // 0.5. True global keybindings — must work even in Insert mode
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(KeyAction::Quit),
-        (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
+        (KeyCode::Left | KeyCode::Char('h'), KeyModifiers::CONTROL) => {
             app.exit_insert_mode();
             return Ok(KeyAction::Continue);
         }
-        (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
+        (KeyCode::Right | KeyCode::Char('l'), KeyModifiers::CONTROL) => {
             app.enter_insert_mode();
             return Ok(KeyAction::Continue);
         }
@@ -430,9 +429,6 @@ enum EscapeSeqResult {
 /// - If pending: flush buffered + process current (FlushAndProcess)
 /// - If no pending: pass through directly (PassThrough)
 fn try_escape_sequence(app: &mut App, key: KeyEvent) -> EscapeSeqResult {
-    let is_trigger = matches!(key.code, KeyCode::Char('j') | KeyCode::Char('k'))
-        && key.modifiers == KeyModifiers::NONE;
-
     let trigger_char = match key.code {
         KeyCode::Char(c @ ('j' | 'k')) if key.modifiers == KeyModifiers::NONE => Some(c),
         _ => None,
@@ -461,10 +457,10 @@ fn try_escape_sequence(app: &mut App, key: KeyEvent) -> EscapeSeqResult {
 
             if elapsed > app::ESCAPE_SEQ_TIMEOUT_MS {
                 // Timed out — flush old key, process new key from scratch
-                if is_trigger {
+                if let Some(c) = trigger_char {
                     // New trigger key: buffer it as new pending
                     app.escape_seq_state = EscapeSequenceState::Pending {
-                        first_key: trigger_char.unwrap(),
+                        first_key: c,
                         first_key_event: key,
                         started_at: std::time::Instant::now(),
                     };
@@ -675,7 +671,7 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
             match key.code {
                 // Accumulate digits (0-9)
                 KeyCode::Char(c @ '0'..='9') => {
-                    let digit = c.to_digit(10).unwrap();
+                    let digit = (c as u32) - ('0' as u32);
                     // Cap at 9999 to prevent overflow
                     let new_count = (count * 10 + digit).min(9999);
                     app.chord_state = ChordState::CountPending {
@@ -719,7 +715,7 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
 
         // Numbers 1-9 start count prefix (for 5j, 10k style navigation)
         KeyCode::Char(c @ '1'..='9') => {
-            let digit = c.to_digit(10).unwrap();
+            let digit = (c as u32) - ('0' as u32);
             app.chord_state = ChordState::CountPending {
                 count: digit,
                 started_at: std::time::Instant::now(),
@@ -812,7 +808,7 @@ fn handle_sidebar_enter(app: &mut App) -> Result<()> {
             // Toggle expand/collapse on group headers
             app.toggle_current_group();
         }
-        Some(SidebarItem::BookmarkHeader) | Some(SidebarItem::BookmarkSeparator) => {
+        Some(SidebarItem::BookmarkHeader | SidebarItem::BookmarkSeparator) => {
             // Non-interactive items — no-op
         }
         _ => {
@@ -991,7 +987,7 @@ fn perform_hot_reload() -> Result<String> {
         exe_dir.join("claudatui")
     };
 
-    Ok(new_binary.to_string_lossy().to_string())
+    Ok(new_binary.to_string_lossy().into_owned())
 }
 
 fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
@@ -1003,22 +999,22 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
 
     // Clone filter state to avoid overlapping borrows with render_stateful_widget
     let filter_query = app.sidebar_state.filter_query.clone();
-    let filter_active = app.sidebar_state.filter_active;
-    let filter_cursor_pos = app.sidebar_state.filter_cursor_pos;
+
+    // Build sidebar context with shared parameters
+    let sidebar_ctx = SidebarContext {
+        groups: &app.groups,
+        running_sessions: &running_sessions,
+        ephemeral_sessions: &app.ephemeral_sessions,
+        hide_inactive: app.sidebar_state.hide_inactive,
+        archive_filter: app.sidebar_state.archive_filter,
+        bookmark_manager: &app.bookmark_manager,
+        filter_query: &filter_query,
+        filter_active: app.sidebar_state.filter_active,
+        filter_cursor_pos: app.sidebar_state.filter_cursor_pos,
+    };
 
     // Draw sidebar with running session indicators and ephemeral sessions
-    let sidebar = Sidebar::new(
-        &app.groups,
-        app.focus == Focus::Sidebar,
-        &running_sessions,
-        &app.ephemeral_sessions,
-        app.sidebar_state.hide_inactive,
-        app.sidebar_state.archive_filter,
-        &app.bookmark_manager,
-        &filter_query,
-        filter_active,
-        filter_cursor_pos,
-    );
+    let sidebar = Sidebar::new(&sidebar_ctx, app.focus == Focus::Sidebar);
     f.render_stateful_widget(sidebar, sidebar_area, &mut app.sidebar_state);
 
     // Cache terminal inner area for mouse coordinate mapping (area minus 1px border)

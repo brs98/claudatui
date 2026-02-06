@@ -128,14 +128,14 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_bookmark_manager_empty() {
+    fn empty_manager_has_zero_count_and_no_bookmarks() {
         let manager = BookmarkManager::empty();
         assert_eq!(manager.count(), 0);
         assert!(manager.get(1).is_none());
     }
 
     #[test]
-    fn test_bookmark_add_and_get() {
+    fn set_bookmark_increments_count_and_is_retrievable() {
         let mut manager = BookmarkManager::empty();
 
         let bookmark = Bookmark::new_project(
@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bookmark_remove() {
+    fn remove_bookmark_decrements_count_and_second_remove_returns_false() {
         let mut manager = BookmarkManager::empty();
 
         let bookmark = Bookmark::new_project(
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_group_bookmarked() {
+    fn is_group_bookmarked_returns_slot_for_matching_group_key() {
         let mut manager = BookmarkManager::empty();
 
         let bookmark = Bookmark::new_project(

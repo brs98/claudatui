@@ -50,7 +50,7 @@ impl<'a> WhichKeyWidget<'a> {
                 "SPC {}",
                 self.path
                     .iter()
-                    .map(|c| c.to_string())
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(" ")
             )
@@ -141,21 +141,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_title_empty_path() {
+    fn build_title_shows_leader_label_for_empty_path() {
         let config = WhichKeyConfig::new();
         let widget = WhichKeyWidget::new(&config, &[]);
         assert_eq!(widget.build_title(), "SPC | Leader");
     }
 
     #[test]
-    fn test_build_title_with_path() {
+    fn build_title_shows_submenu_label_for_bookmark_path() {
         let config = WhichKeyConfig::new();
         let widget = WhichKeyWidget::new(&config, &['b']);
         assert_eq!(widget.build_title(), "SPC b | Bookmarks");
     }
 
     #[test]
-    fn test_calculate_area() {
+    fn calculate_area_positions_widget_near_bottom_of_screen() {
         let screen = Rect::new(0, 0, 100, 30);
         let area = WhichKeyWidget::calculate_area(screen);
         assert_eq!(area.height, 4);

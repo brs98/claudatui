@@ -10,7 +10,6 @@ pub mod app;
 pub mod bookmarks;
 pub mod claude;
 pub mod config;
-pub mod event;
 pub mod input;
 pub mod pty;
 pub mod search;

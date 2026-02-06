@@ -1,3 +1,5 @@
+//! Terminal UI components: sidebar, terminal pane, modals, and widgets.
+
 pub mod layout;
 pub mod modal;
 pub mod sidebar;

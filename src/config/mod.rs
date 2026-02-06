@@ -139,7 +139,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
+    fn default_config_has_expected_layout_and_dangerous_mode() {
         let config = Config::default();
         assert_eq!(config.layout.sidebar_width_pct, 25);
         assert_eq!(config.layout.sidebar_position, SidebarPosition::Left);
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn test_layout_validate() {
+    fn layout_validate_clamps_sidebar_width_to_valid_range() {
         let mut layout = LayoutConfig {
             sidebar_width_pct: 5, // Below minimum
             ..Default::default()
@@ -165,13 +165,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sidebar_position_toggle() {
+    fn sidebar_position_toggle_swaps_left_and_right() {
         assert_eq!(SidebarPosition::Left.toggle(), SidebarPosition::Right);
         assert_eq!(SidebarPosition::Right.toggle(), SidebarPosition::Left);
     }
 
     #[test]
-    fn test_config_serialization() {
+    fn config_roundtrips_through_json_serialization() {
         let config = Config::default();
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();

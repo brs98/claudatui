@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+//! Sidebar widget for browsing conversation groups, bookmarks, and sessions.
+
+use std::collections::{HashMap, HashSet};
 
 use ratatui::{
     buffer::Buffer,
@@ -21,23 +23,51 @@ const DEFAULT_VISIBLE_PROJECTS: usize = 5;
 /// Default number of conversations shown per project before "Show more" appears
 const DEFAULT_VISIBLE_CONVERSATIONS: usize = 3;
 
+/// Bundles the common parameters shared across sidebar rendering functions.
+pub struct SidebarContext<'a> {
+    /// Conversation groups to display
+    pub groups: &'a [ConversationGroup],
+    /// Session IDs that are currently running (have active PTYs)
+    pub running_sessions: &'a HashSet<String>,
+    /// Ephemeral sessions: temp session_id -> session info
+    pub ephemeral_sessions: &'a HashMap<String, EphemeralSession>,
+    /// Whether to hide inactive (Idle) sessions
+    pub hide_inactive: bool,
+    /// Archive filter mode
+    pub archive_filter: ArchiveFilter,
+    /// Bookmark manager for displaying bookmarks
+    pub bookmark_manager: &'a BookmarkManager,
+    /// Current filter query text (empty = no filter)
+    pub filter_query: &'a str,
+    /// Whether the filter input is actively accepting keystrokes
+    pub filter_active: bool,
+    /// Cursor position within the filter input (only used when filter_active)
+    pub filter_cursor_pos: usize,
+}
+
 /// Archive filter modes for the sidebar
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ArchiveFilter {
+    /// Show only non-archived conversations
     #[default]
-    Active, // Show only non-archived
-    Archived, // Show only archived
-    All,      // Show both
+    Active,
+    /// Show only archived conversations
+    Archived,
+    /// Show all conversations
+    All,
 }
 
-/// Sidebar widget state
+/// Sidebar widget state tracking selection, collapsed groups, and filter state.
 #[derive(Default)]
 pub struct SidebarState {
+    /// Ratatui list selection state
     pub list_state: ListState,
-    pub collapsed_groups: std::collections::HashSet<String>,
+    /// Group keys that are collapsed (conversations hidden)
+    pub collapsed_groups: HashSet<String>,
+    /// Whether to show all projects or limit to recent ones
     pub show_all_projects: bool,
     /// Group keys that have all conversations expanded (not limited to DEFAULT_VISIBLE_CONVERSATIONS)
-    pub expanded_conversations: std::collections::HashSet<String>,
+    pub expanded_conversations: HashSet<String>,
     /// When true, hide Idle sessions (only show Active, WaitingForInput, or running sessions)
     pub hide_inactive: bool,
     /// Current archive filter mode
@@ -51,12 +81,14 @@ pub struct SidebarState {
 }
 
 impl SidebarState {
+    /// Create a new sidebar state with the first item selected.
     pub fn new() -> Self {
         let mut state = Self::default();
         state.list_state.select(Some(0));
         state
     }
 
+    /// Toggle a group between collapsed and expanded.
     pub fn toggle_group(&mut self, group_key: &str) {
         if self.collapsed_groups.contains(group_key) {
             self.collapsed_groups.remove(group_key);
@@ -65,10 +97,12 @@ impl SidebarState {
         }
     }
 
+    /// Toggle between showing all projects and showing only recent ones.
     pub fn toggle_show_all_projects(&mut self) {
         self.show_all_projects = !self.show_all_projects;
     }
 
+    /// Toggle between showing all conversations in a group and limiting to default count.
     pub fn toggle_expanded_conversations(&mut self, group_key: &str) {
         if self.expanded_conversations.contains(group_key) {
             self.expanded_conversations.remove(group_key);
@@ -77,6 +111,7 @@ impl SidebarState {
         }
     }
 
+    /// Toggle filtering to show only active/running sessions.
     pub fn toggle_hide_inactive(&mut self) {
         self.hide_inactive = !self.hide_inactive;
     }
@@ -179,54 +214,18 @@ pub enum FilterKeyResult {
     Deactivated,
 }
 
-/// Sidebar widget for displaying conversations
+/// Sidebar widget for displaying conversations.
 pub struct Sidebar<'a> {
-    groups: &'a [ConversationGroup],
+    /// Common sidebar parameters
+    ctx: &'a SidebarContext<'a>,
+    /// Whether the sidebar has keyboard focus
     focused: bool,
-    /// Session IDs that are currently running (have active PTYs)
-    running_sessions: &'a std::collections::HashSet<String>,
-    /// Ephemeral sessions: temp session_id -> session info
-    ephemeral_sessions: &'a HashMap<String, EphemeralSession>,
-    /// Whether to hide inactive (Idle) sessions
-    hide_inactive: bool,
-    /// Archive filter mode
-    archive_filter: ArchiveFilter,
-    /// Bookmark manager for displaying bookmarks
-    bookmark_manager: &'a BookmarkManager,
-    /// Current filter query text (empty = no filter)
-    filter_query: &'a str,
-    /// Whether the filter input is actively accepting keystrokes
-    filter_active: bool,
-    /// Cursor position within the filter input (only used when filter_active)
-    filter_cursor_pos: usize,
 }
 
 impl<'a> Sidebar<'a> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        groups: &'a [ConversationGroup],
-        focused: bool,
-        running_sessions: &'a std::collections::HashSet<String>,
-        ephemeral_sessions: &'a HashMap<String, EphemeralSession>,
-        hide_inactive: bool,
-        archive_filter: ArchiveFilter,
-        bookmark_manager: &'a BookmarkManager,
-        filter_query: &'a str,
-        filter_active: bool,
-        filter_cursor_pos: usize,
-    ) -> Self {
-        Self {
-            groups,
-            focused,
-            running_sessions,
-            ephemeral_sessions,
-            hide_inactive,
-            archive_filter,
-            bookmark_manager,
-            filter_query,
-            filter_active,
-            filter_cursor_pos,
-        }
+    /// Create a new sidebar widget.
+    pub fn new(ctx: &'a SidebarContext<'a>, focused: bool) -> Self {
+        Self { ctx, focused }
     }
 }
 
@@ -241,7 +240,7 @@ impl<'a> StatefulWidget for Sidebar<'a> {
         };
 
         // Get title based on hide_inactive and archive filter
-        let title = match (self.hide_inactive, self.archive_filter) {
+        let title = match (self.ctx.hide_inactive, self.ctx.archive_filter) {
             (true, ArchiveFilter::Active) => " Conversations (active) ",
             (false, ArchiveFilter::Active) => " Conversations ",
             (_, ArchiveFilter::Archived) => " Conversations (archived) ",
@@ -257,7 +256,7 @@ impl<'a> StatefulWidget for Sidebar<'a> {
         block.render(area, buf);
 
         // Split inner area: filter row at top (when visible), list below
-        let show_filter_row = self.filter_active || !self.filter_query.is_empty();
+        let show_filter_row = self.ctx.filter_active || !self.ctx.filter_query.is_empty();
         let (filter_area, list_area) = if show_filter_row && inner_area.height > 1 {
             (
                 Rect {
@@ -279,25 +278,19 @@ impl<'a> StatefulWidget for Sidebar<'a> {
             render_filter_row(
                 filter_area,
                 buf,
-                self.filter_query,
-                self.filter_active,
-                self.filter_cursor_pos,
+                self.ctx.filter_query,
+                self.ctx.filter_active,
+                self.ctx.filter_cursor_pos,
             );
         }
 
         let selected_index = state.list_state.selected();
         let items = build_list_items(
-            self.groups,
+            self.ctx,
             &state.collapsed_groups,
             state.show_all_projects,
             &state.expanded_conversations,
-            self.running_sessions,
-            self.ephemeral_sessions,
-            self.hide_inactive,
-            self.archive_filter,
             selected_index,
-            self.bookmark_manager,
-            self.filter_query,
         );
         let list = List::new(items)
             .highlight_style(
@@ -359,29 +352,22 @@ fn render_filter_row(area: Rect, buf: &mut Buffer, query: &str, active: bool, cu
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_list_items(
-    groups: &[ConversationGroup],
-    collapsed: &std::collections::HashSet<String>,
+    ctx: &SidebarContext,
+    collapsed: &HashSet<String>,
     show_all_projects: bool,
-    expanded_conversations: &std::collections::HashSet<String>,
-    running_sessions: &std::collections::HashSet<String>,
-    ephemeral_sessions: &HashMap<String, EphemeralSession>,
-    hide_inactive: bool,
-    archive_filter: ArchiveFilter,
+    expanded_conversations: &HashSet<String>,
     selected_index: Option<usize>,
-    bookmark_manager: &BookmarkManager,
-    filter_query: &str,
 ) -> Vec<ListItem<'static>> {
     let mut items = Vec::new();
     let mut current_index: usize = 0;
 
     // Prepare case-insensitive filter query
-    let filter_lower = filter_query.to_lowercase();
+    let filter_lower = ctx.filter_query.to_lowercase();
     let has_text_filter = !filter_lower.is_empty();
 
     // Render bookmarks section at the top
-    let bookmarks = bookmark_manager.get_all();
+    let bookmarks = ctx.bookmark_manager.get_all();
     if !bookmarks.is_empty() {
         // Bookmark section header
         items.push(ListItem::new(Line::from(vec![
@@ -423,15 +409,17 @@ fn build_list_items(
         current_index += 1;
     }
 
-    let visible_groups = if show_all_projects || groups.len() <= DEFAULT_VISIBLE_PROJECTS {
-        groups
+    let visible_groups = if show_all_projects || ctx.groups.len() <= DEFAULT_VISIBLE_PROJECTS {
+        ctx.groups
     } else {
-        &groups[..DEFAULT_VISIBLE_PROJECTS]
+        &ctx.groups[..DEFAULT_VISIBLE_PROJECTS]
     };
 
     for group in visible_groups {
         // Skip groups with no active content when hide_inactive is enabled
-        if hide_inactive && !group_has_active_content(group, running_sessions, ephemeral_sessions) {
+        if ctx.hide_inactive
+            && !group_has_active_content(group, ctx.running_sessions, ctx.ephemeral_sessions)
+        {
             continue;
         }
 
@@ -442,14 +430,21 @@ fn build_list_items(
         // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {
             !conv.is_plan_implementation
-                && should_show_conversation(conv, archive_filter, running_sessions, hide_inactive)
+                && should_show_conversation(
+                    conv,
+                    ctx.archive_filter,
+                    ctx.running_sessions,
+                    ctx.hide_inactive,
+                )
                 && (!has_text_filter
                     || group_name_matches
                     || conv_matches_filter(conv, &filter_lower))
         });
 
         // Skip groups with no visible conversations (unless showing all and no text filter)
-        if !has_visible_conversations && (archive_filter != ArchiveFilter::All || has_text_filter) {
+        if !has_visible_conversations
+            && (ctx.archive_filter != ArchiveFilter::All || has_text_filter)
+        {
             continue;
         }
 
@@ -457,7 +452,7 @@ fn build_list_items(
         let is_collapsed = collapsed.contains(&group_key);
 
         // Check if this group is bookmarked
-        let bookmark_slot = bookmark_manager.is_group_bookmarked(&group_key);
+        let bookmark_slot = ctx.bookmark_manager.is_group_bookmarked(&group_key);
         let star_indicator = if let Some(slot) = bookmark_slot {
             Span::styled(format!(" [{}]", slot), Style::default().fg(Color::Yellow))
         } else {
@@ -482,7 +477,7 @@ fn build_list_items(
             // (ephemeral sessions are always shown - they're running by definition)
             let group_project_path = group.project_path();
             if let Some(project_path) = group_project_path {
-                for (session_id, ephemeral) in ephemeral_sessions {
+                for (session_id, ephemeral) in ctx.ephemeral_sessions {
                     if ephemeral.project_path == project_path {
                         // Render ephemeral session with distinctive styling
                         let line_num = format_relative_line_number(current_index, selected_index);
@@ -510,7 +505,12 @@ fn build_list_items(
                 .iter()
                 .filter(|conv| !conv.is_plan_implementation)
                 .filter(|conv| {
-                    should_show_conversation(conv, archive_filter, running_sessions, hide_inactive)
+                    should_show_conversation(
+                        conv,
+                        ctx.archive_filter,
+                        ctx.running_sessions,
+                        ctx.hide_inactive,
+                    )
                 })
                 .filter(|conv| {
                     !has_text_filter
@@ -536,7 +536,7 @@ fn build_list_items(
             for conv in &visible_convos {
                 // If session is running in background, show it as Active
                 // regardless of the file-based status
-                let is_running = running_sessions.contains(&conv.session_id);
+                let is_running = ctx.running_sessions.contains(&conv.session_id);
                 let (status_indicator, archive_indicator) = if is_running {
                     (Span::styled("● ", Style::default().fg(Color::Green)), None)
                 } else {
@@ -552,7 +552,7 @@ fn build_list_items(
                         }
                     };
                     // Show archive indicator when in "All" view
-                    let archive = if archive_filter == ArchiveFilter::All && conv.is_archived {
+                    let archive = if ctx.archive_filter == ArchiveFilter::All && conv.is_archived {
                         Some(Span::styled("📦 ", Style::default().fg(Color::DarkGray)))
                     } else {
                         None
@@ -597,13 +597,15 @@ fn build_list_items(
     }
 
     // Add "Show more" at end if truncated
-    if !show_all_projects && groups.len() > DEFAULT_VISIBLE_PROJECTS {
+    if !show_all_projects && ctx.groups.len() > DEFAULT_VISIBLE_PROJECTS {
         // When hide_inactive is enabled, count only hidden groups with active content
-        let hidden_groups = &groups[DEFAULT_VISIBLE_PROJECTS..];
-        let hidden = if hide_inactive {
+        let hidden_groups = &ctx.groups[DEFAULT_VISIBLE_PROJECTS..];
+        let hidden = if ctx.hide_inactive {
             hidden_groups
                 .iter()
-                .filter(|g| group_has_active_content(g, running_sessions, ephemeral_sessions))
+                .filter(|g| {
+                    group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions)
+                })
                 .count()
         } else {
             hidden_groups.len()
@@ -659,7 +661,7 @@ fn conv_matches_filter(
 fn should_show_conversation(
     conv: &crate::claude::conversation::Conversation,
     archive_filter: ArchiveFilter,
-    running_sessions: &std::collections::HashSet<String>,
+    running_sessions: &HashSet<String>,
     hide_inactive: bool,
 ) -> bool {
     // First check archive filter
@@ -689,7 +691,7 @@ fn should_show_conversation(
 /// Check if a group has any active content (for hide_inactive filtering)
 pub fn group_has_active_content(
     group: &ConversationGroup,
-    running_sessions: &std::collections::HashSet<String>,
+    running_sessions: &HashSet<String>,
     ephemeral_sessions: &HashMap<String, EphemeralSession>,
 ) -> bool {
     // Check for ephemeral sessions in this group
@@ -718,32 +720,46 @@ pub fn group_has_active_content(
 /// Represents an item in the flattened sidebar list
 #[derive(Debug, Clone)]
 pub enum SidebarItem {
+    /// Header row for the bookmarks section
     BookmarkHeader,
+    /// A single bookmark slot
     BookmarkEntry {
+        /// Bookmark slot number (1-9)
         slot: u8,
     },
+    /// Visual separator after bookmarks
     BookmarkSeparator,
+    /// Header row for a project group
     GroupHeader {
+        /// Unique group key for collapse/expand tracking
         key: String,
-        #[allow(dead_code)]
+        /// Display name for the group
         name: String,
     },
+    /// A conversation within a group
     Conversation {
+        /// Key of the parent group
         group_key: String,
+        /// Index into the group's conversation list
         index: usize,
     },
     /// A running session that hasn't been saved yet (temp session)
     EphemeralSession {
+        /// Session identifier
         session_id: String,
+        /// Key of the parent group
         group_key: String,
     },
+    /// "Show N more projects" expandable row
     ShowMoreProjects {
-        #[allow(dead_code)]
+        /// Number of hidden projects
         hidden_count: usize,
     },
+    /// "Show N more conversations" expandable row within a group
     ShowMoreConversations {
+        /// Key of the parent group
         group_key: String,
-        #[allow(dead_code)]
+        /// Number of hidden conversations
         hidden_count: usize,
     },
 }
@@ -759,27 +775,20 @@ impl SidebarItem {
     }
 }
 
-/// Build a flat list of sidebar items for navigation
-#[allow(clippy::too_many_arguments)]
+/// Build a flat list of sidebar items for navigation.
 pub fn build_sidebar_items(
-    groups: &[ConversationGroup],
-    collapsed: &std::collections::HashSet<String>,
+    ctx: &SidebarContext,
+    collapsed: &HashSet<String>,
     show_all_projects: bool,
-    expanded_conversations: &std::collections::HashSet<String>,
-    ephemeral_sessions: &HashMap<String, EphemeralSession>,
-    running_sessions: &std::collections::HashSet<String>,
-    hide_inactive: bool,
-    archive_filter: ArchiveFilter,
-    bookmark_manager: &BookmarkManager,
-    filter_query: &str,
+    expanded_conversations: &HashSet<String>,
 ) -> Vec<SidebarItem> {
     let mut items = Vec::new();
 
-    let filter_lower = filter_query.to_lowercase();
+    let filter_lower = ctx.filter_query.to_lowercase();
     let has_text_filter = !filter_lower.is_empty();
 
     // Insert bookmark items at the top, mirroring build_list_items
-    let bookmarks = bookmark_manager.get_all();
+    let bookmarks = ctx.bookmark_manager.get_all();
     if !bookmarks.is_empty() {
         items.push(SidebarItem::BookmarkHeader);
         for bookmark in bookmarks {
@@ -790,15 +799,17 @@ pub fn build_sidebar_items(
         items.push(SidebarItem::BookmarkSeparator);
     }
 
-    let visible_groups = if show_all_projects || groups.len() <= DEFAULT_VISIBLE_PROJECTS {
-        groups
+    let visible_groups = if show_all_projects || ctx.groups.len() <= DEFAULT_VISIBLE_PROJECTS {
+        ctx.groups
     } else {
-        &groups[..DEFAULT_VISIBLE_PROJECTS]
+        &ctx.groups[..DEFAULT_VISIBLE_PROJECTS]
     };
 
     for group in visible_groups {
         // Skip groups with no active content when hide_inactive is enabled
-        if hide_inactive && !group_has_active_content(group, running_sessions, ephemeral_sessions) {
+        if ctx.hide_inactive
+            && !group_has_active_content(group, ctx.running_sessions, ctx.ephemeral_sessions)
+        {
             continue;
         }
 
@@ -811,14 +822,21 @@ pub fn build_sidebar_items(
         // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {
             !conv.is_plan_implementation
-                && should_show_conversation(conv, archive_filter, running_sessions, hide_inactive)
+                && should_show_conversation(
+                    conv,
+                    ctx.archive_filter,
+                    ctx.running_sessions,
+                    ctx.hide_inactive,
+                )
                 && (!has_text_filter
                     || group_name_matches
                     || conv_matches_filter(conv, &filter_lower))
         });
 
         // Skip groups with no visible conversations
-        if !has_visible_conversations && (archive_filter != ArchiveFilter::All || has_text_filter) {
+        if !has_visible_conversations
+            && (ctx.archive_filter != ArchiveFilter::All || has_text_filter)
+        {
             continue;
         }
 
@@ -831,10 +849,10 @@ pub fn build_sidebar_items(
             // First, add ephemeral sessions for this group
             // (ephemeral sessions are always shown - they're running by definition)
             // But only in Active or All views (not in Archived view)
-            if archive_filter != ArchiveFilter::Archived {
+            if ctx.archive_filter != ArchiveFilter::Archived {
                 let group_project_path = group.project_path();
                 if let Some(project_path) = group_project_path {
-                    for (session_id, ephemeral) in ephemeral_sessions {
+                    for (session_id, ephemeral) in ctx.ephemeral_sessions {
                         if ephemeral.project_path == project_path {
                             items.push(SidebarItem::EphemeralSession {
                                 session_id: session_id.clone(),
@@ -854,7 +872,12 @@ pub fn build_sidebar_items(
                 .enumerate()
                 .filter(|(_, conv)| !conv.is_plan_implementation)
                 .filter(|(_, conv)| {
-                    should_show_conversation(conv, archive_filter, running_sessions, hide_inactive)
+                    should_show_conversation(
+                        conv,
+                        ctx.archive_filter,
+                        ctx.running_sessions,
+                        ctx.hide_inactive,
+                    )
                 })
                 .filter(|(_, conv)| {
                     !has_text_filter
@@ -896,13 +919,15 @@ pub fn build_sidebar_items(
     }
 
     // Add "Show more" item if there are hidden projects
-    if !show_all_projects && groups.len() > DEFAULT_VISIBLE_PROJECTS {
+    if !show_all_projects && ctx.groups.len() > DEFAULT_VISIBLE_PROJECTS {
         // When hide_inactive is enabled, count only hidden groups with active content
-        let hidden_groups = &groups[DEFAULT_VISIBLE_PROJECTS..];
-        let hidden_count = if hide_inactive {
+        let hidden_groups = &ctx.groups[DEFAULT_VISIBLE_PROJECTS..];
+        let hidden_count = if ctx.hide_inactive {
             hidden_groups
                 .iter()
-                .filter(|g| group_has_active_content(g, running_sessions, ephemeral_sessions))
+                .filter(|g| {
+                    group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions)
+                })
                 .count()
         } else {
             hidden_groups.len()

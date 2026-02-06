@@ -1,8 +1,10 @@
+//! Application state and core data types for claudatui.
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::KeyEvent;
 
 use ratatui::layout::Rect;
@@ -22,36 +24,60 @@ use crate::search::SearchEngine;
 use crate::session::{ScreenState, SessionManager, SessionState};
 use crate::ui::modal::{NewProjectModalState, SearchModalState, WorktreeModalState};
 use crate::ui::sidebar::{
-    build_sidebar_items, group_has_active_content, SidebarItem, SidebarState,
+    build_sidebar_items, group_has_active_content, SidebarContext, SidebarItem, SidebarState,
 };
 use crate::ui::toast::{ToastManager, ToastType};
 
 /// Clipboard status for feedback display
 #[derive(Debug, Clone)]
 pub enum ClipboardStatus {
+    /// No recent clipboard action
     None,
-    Copied { path: String, at: Instant },
+    /// A path was copied at the given instant
+    Copied {
+        /// The path that was copied
+        path: String,
+        /// When the copy happened
+        at: Instant,
+    },
 }
 
 /// Archive status for feedback display
 #[derive(Debug, Clone)]
 pub enum ArchiveStatus {
+    /// No recent archive action
     None,
-    Archived { session_id: String, at: Instant },
-    Unarchived { session_id: String, at: Instant },
+    /// A session was archived
+    Archived {
+        /// The session that was archived
+        session_id: String,
+        /// When the archive happened
+        at: Instant,
+    },
+    /// A session was unarchived
+    Unarchived {
+        /// The session that was unarchived
+        session_id: String,
+        /// When the unarchive happened
+        at: Instant,
+    },
 }
 
 /// A position within the terminal content grid (row/col in screen coordinates)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalPosition {
+    /// Row index (0-based from top of terminal content)
     pub row: usize,
+    /// Column index (0-based from left)
     pub col: usize,
 }
 
 /// Text selection in the terminal pane (anchor = mouse down, cursor = current drag position)
 #[derive(Debug, Clone)]
 pub struct TextSelection {
+    /// Position where the mouse was pressed down
     pub anchor: TerminalPosition,
+    /// Current drag position
     pub cursor: TerminalPosition,
 }
 
@@ -103,13 +129,16 @@ pub enum ModalState {
     Worktree(Box<WorktreeModalState>),
 }
 
-/// Split mode configuration
+/// Split mode configuration for dual-pane terminal layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SplitMode {
+    /// Single pane (default)
     #[default]
-    None, // Single pane (current behavior)
-    Horizontal, // Side-by-side (left/right)
-    Vertical,   // Stacked (top/bottom)
+    None,
+    /// Side-by-side (left/right)
+    Horizontal,
+    /// Stacked (top/bottom)
+    Vertical,
 }
 
 impl SplitMode {
@@ -123,12 +152,14 @@ impl SplitMode {
     }
 }
 
-/// Identifies which terminal pane is active in split mode
+/// Identifies which terminal pane is active in split mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalPaneId {
+    /// Left or top pane
     #[default]
-    Primary, // Left or Top pane
-    Secondary, // Right or Bottom pane (only in split mode)
+    Primary,
+    /// Right or bottom pane (only in split mode)
+    Secondary,
 }
 
 impl TerminalPaneId {
@@ -152,14 +183,17 @@ impl TerminalPaneId {
 /// Configuration for each terminal pane
 #[derive(Debug, Clone, Default)]
 pub struct PaneConfig {
+    /// Session ID currently displayed in this pane, if any
     pub session_id: Option<String>,
 }
 
-/// Which pane is currently focused
+/// Which UI pane currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
+    /// Sidebar has focus
     #[default]
     Sidebar,
+    /// A terminal pane has focus
     Terminal(TerminalPaneId),
 }
 
@@ -247,7 +281,7 @@ pub struct App {
     /// Terminal size
     pub term_size: (u16, u16),
     /// Counter for generating temp session IDs for new conversations
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "planned for future use")]
     new_session_counter: usize,
     /// Running sessions that haven't been saved yet (temp IDs)
     /// Maps daemon session_id -> ephemeral session info
@@ -298,16 +332,15 @@ impl App {
     /// Create a new application instance
     pub fn new() -> Result<Self> {
         let claude_dir = dirs::home_dir()
-            .expect("Could not find home directory")
+            .context("Could not find home directory")?
             .join(".claude");
 
         // Create sessions watcher (optional - app works without it)
         let sessions_watcher = SessionsWatcher::new(claude_dir.clone()).ok();
 
         // Create archive manager
-        let archive_manager = ArchiveManager::new(&claude_dir).unwrap_or_else(|_| {
-            ArchiveManager::new(&claude_dir).expect("Failed to create archive manager")
-        });
+        let archive_manager =
+            ArchiveManager::new(&claude_dir).context("Failed to create archive manager")?;
 
         // Create search engine
         let search_engine = SearchEngine::new(claude_dir.clone());
@@ -369,7 +402,7 @@ impl App {
         let sessions = parse_all_sessions(&self.claude_dir)?;
         let conversations = self.sessions_to_conversations(sessions);
         self.groups = group_conversations(conversations);
-        self.group_order = self.groups.iter().map(|g| g.key()).collect();
+        self.group_order = self.groups.iter().map(ConversationGroup::key).collect();
         Ok(())
     }
 
@@ -436,17 +469,23 @@ impl App {
 
     /// Get the flattened sidebar items for navigation
     pub fn sidebar_items(&self) -> Vec<SidebarItem> {
+        let running = self.running_session_ids();
+        let ctx = SidebarContext {
+            groups: &self.groups,
+            running_sessions: &running,
+            ephemeral_sessions: &self.ephemeral_sessions,
+            hide_inactive: self.sidebar_state.hide_inactive,
+            archive_filter: self.sidebar_state.archive_filter,
+            bookmark_manager: &self.bookmark_manager,
+            filter_query: &self.sidebar_state.filter_query,
+            filter_active: self.sidebar_state.filter_active,
+            filter_cursor_pos: self.sidebar_state.filter_cursor_pos,
+        };
         build_sidebar_items(
-            &self.groups,
+            &ctx,
             &self.sidebar_state.collapsed_groups,
             self.sidebar_state.show_all_projects,
             &self.sidebar_state.expanded_conversations,
-            &self.ephemeral_sessions,
-            &self.running_session_ids(),
-            self.sidebar_state.hide_inactive,
-            self.sidebar_state.archive_filter,
-            &self.bookmark_manager,
-            &self.sidebar_state.filter_query,
         )
     }
 
@@ -500,7 +539,7 @@ impl App {
         }
         let first = items
             .iter()
-            .position(|item| item.is_selectable())
+            .position(SidebarItem::is_selectable)
             .unwrap_or(0);
         self.sidebar_state.list_state.select(Some(first));
         self.update_selected_conversation();
@@ -514,7 +553,7 @@ impl App {
         }
         let last = items
             .iter()
-            .rposition(|item| item.is_selectable())
+            .rposition(SidebarItem::is_selectable)
             .unwrap_or(items.len() - 1);
         self.sidebar_state.list_state.select(Some(last));
         self.update_selected_conversation();
@@ -790,7 +829,7 @@ impl App {
                     let existing_session = self
                         .session_to_claude_id
                         .iter()
-                        .find(|(_, v)| **v == Some(claude_session_id.clone()))
+                        .find(|(_, v)| v.as_deref() == Some(claude_session_id.as_str()))
                         .map(|(k, _)| k.clone());
 
                     if let Some(daemon_session_id) = existing_session {
@@ -828,7 +867,7 @@ impl App {
         }
         // If we landed on a non-selectable item, scan forward to the nearest selectable
         if !items[new_idx].is_selectable() {
-            if let Some(pos) = items[new_idx..].iter().position(|i| i.is_selectable()) {
+            if let Some(pos) = items[new_idx..].iter().position(SidebarItem::is_selectable) {
                 new_idx += pos;
             }
         }
@@ -855,7 +894,10 @@ impl App {
         }
         // If we landed on a non-selectable item, scan backward to the nearest selectable
         if !items[new_idx].is_selectable() {
-            if let Some(pos) = items[..=new_idx].iter().rposition(|i| i.is_selectable()) {
+            if let Some(pos) = items[..=new_idx]
+                .iter()
+                .rposition(SidebarItem::is_selectable)
+            {
                 new_idx = pos;
             }
         }
@@ -967,7 +1009,7 @@ impl App {
                     let existing_session = self
                         .session_to_claude_id
                         .iter()
-                        .find(|(_, v)| **v == Some(claude_session_id.clone()))
+                        .find(|(_, v)| v.as_deref() == Some(claude_session_id.as_str()))
                         .map(|(k, _)| k.clone());
 
                     if let Some(session_id) = existing_session {
@@ -1017,7 +1059,7 @@ impl App {
                 // Jump to bookmarked target
                 self.jump_to_bookmark(*slot)?;
             }
-            Some(SidebarItem::BookmarkHeader) | Some(SidebarItem::BookmarkSeparator) | None => {}
+            Some(SidebarItem::BookmarkHeader | SidebarItem::BookmarkSeparator) | None => {}
         }
 
         Ok(())
@@ -1046,7 +1088,7 @@ impl App {
                 .groups
                 .iter()
                 .find(|g| g.key() == key)
-                .and_then(|g| g.project_path());
+                .and_then(ConversationGroup::project_path);
 
             if let Some(path) = project_path {
                 self.selected_conversation = None;
@@ -1096,7 +1138,7 @@ impl App {
                     let existing_session = self
                         .session_to_claude_id
                         .iter()
-                        .find(|(_, v)| **v == Some(claude_session_id.clone()))
+                        .find(|(_, v)| v.as_deref() == Some(claude_session_id.as_str()))
                         .map(|(k, _)| k.clone());
 
                     if let Some(ref sid) = existing_session {
@@ -1162,8 +1204,10 @@ impl App {
         match result {
             Ok(session_id) => {
                 // Track the mapping from session ID to Claude session
-                self.session_to_claude_id
-                    .insert(session_id.clone(), claude_session_id.map(|s| s.to_string()));
+                self.session_to_claude_id.insert(
+                    session_id.clone(),
+                    claude_session_id.map(ToString::to_string),
+                );
 
                 // Track ephemeral sessions (new sessions without a saved conversation file)
                 if claude_session_id.is_none() {
@@ -1239,6 +1283,7 @@ impl App {
     /// Scroll up by the specified number of lines (active session only)
     pub fn scroll_up(&mut self, lines: usize) {
         self.text_selection = None;
+        // Clone needed: immutable borrow of session_id + mutable borrow of session_manager
         if let Some(ref session_id) = self.active_session_id.clone() {
             if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_up(lines);
@@ -1249,6 +1294,7 @@ impl App {
     /// Scroll down by the specified number of lines (active session only)
     pub fn scroll_down(&mut self, lines: usize) {
         self.text_selection = None;
+        // Clone needed: immutable borrow of session_id + mutable borrow of session_manager
         if let Some(ref session_id) = self.active_session_id.clone() {
             if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_down(lines);
@@ -1258,6 +1304,7 @@ impl App {
 
     /// Jump to the bottom (live view) for active session
     pub fn scroll_to_bottom(&mut self) {
+        // Clone needed: immutable borrow of session_id + mutable borrow of session_manager
         if let Some(ref session_id) = self.active_session_id.clone() {
             if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_to_bottom();
@@ -1275,6 +1322,7 @@ impl App {
 
     /// Write input to active session's PTY
     pub fn write_to_pty(&mut self, data: &[u8]) -> Result<()> {
+        // Clone needed: immutable borrow of session_id + mutable borrow of session_manager
         if let Some(ref session_id) = self.active_session_id.clone() {
             if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.write(data)?;
@@ -1442,14 +1490,17 @@ impl App {
     /// - Not matching conversations already claimed by another daemon session
     fn cleanup_persisted_ephemeral_sessions(&mut self) {
         // Build list of all conversations
-        let all_convs: Vec<&Conversation> =
-            self.groups.iter().flat_map(|g| g.conversations()).collect();
+        let all_convs: Vec<&Conversation> = self
+            .groups
+            .iter()
+            .flat_map(ConversationGroup::conversations)
+            .collect();
 
         // Track which Claude session IDs are already claimed by a daemon
         let claimed_ids: HashSet<String> = self
             .session_to_claude_id
             .values()
-            .filter_map(|v| v.clone())
+            .filter_map(Clone::clone)
             .collect();
 
         // Collect ephemeral sessions to process (avoid borrow issues)
@@ -1465,7 +1516,7 @@ impl App {
             let needs_update = self
                 .session_to_claude_id
                 .get(&daemon_id)
-                .map(|opt| opt.is_none())
+                .map(Option::is_none)
                 .unwrap_or(false);
 
             if !needs_update {
@@ -1708,12 +1759,14 @@ impl App {
                 let session_id = session_id.clone();
                 self.close_session(&session_id);
             }
-            Some(SidebarItem::GroupHeader { .. })
-            | Some(SidebarItem::ShowMoreProjects { .. })
-            | Some(SidebarItem::ShowMoreConversations { .. })
-            | Some(SidebarItem::BookmarkHeader)
-            | Some(SidebarItem::BookmarkEntry { .. })
-            | Some(SidebarItem::BookmarkSeparator)
+            Some(
+                SidebarItem::GroupHeader { .. }
+                | SidebarItem::ShowMoreProjects { .. }
+                | SidebarItem::ShowMoreConversations { .. }
+                | SidebarItem::BookmarkHeader
+                | SidebarItem::BookmarkEntry { .. }
+                | SidebarItem::BookmarkSeparator,
+            )
             | None => {
                 // No-op for non-session items
             }
@@ -1732,7 +1785,7 @@ impl App {
 
         // Copy to clipboard using arboard
         if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let path_str = path.to_string_lossy().to_string();
+            let path_str = path.to_string_lossy().into_owned();
             if clipboard.set_text(&path_str).is_ok() {
                 self.toast_success("Copied to clipboard");
             } else {
@@ -2007,7 +2060,7 @@ impl App {
             .groups
             .iter()
             .find(|g| g.key() == key)
-            .and_then(|g| g.project_path());
+            .and_then(ConversationGroup::project_path);
 
         let Some(path) = project_path else {
             self.toast_error("No project path for this group");
@@ -2041,7 +2094,7 @@ impl App {
             .groups
             .iter()
             .find(|g| g.key() == group_key)
-            .and_then(|g| g.project_path());
+            .and_then(ConversationGroup::project_path);
 
         let Some(path) = project_path else {
             if let ModalState::Worktree(ref mut state) = self.modal_state {
@@ -2603,7 +2656,7 @@ pub fn extract_selected_text(screen: &ScreenState, selection: &TextSelection) ->
     }
 
     // Remove trailing empty lines
-    while lines.last().is_some_and(|l| l.is_empty()) {
+    while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
 
@@ -2633,5 +2686,144 @@ impl ChordState {
             ChordState::DeletePending { .. } => Some("d".to_string()),
             ChordState::CountPending { count, .. } => Some(count.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordered_returns_anchor_first_when_anchor_is_before_cursor() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 1, col: 5 },
+            cursor: TerminalPosition { row: 3, col: 10 },
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, TerminalPosition { row: 1, col: 5 });
+        assert_eq!(end, TerminalPosition { row: 3, col: 10 });
+    }
+
+    #[test]
+    fn ordered_swaps_when_cursor_is_before_anchor() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 5, col: 10 },
+            cursor: TerminalPosition { row: 2, col: 3 },
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, TerminalPosition { row: 2, col: 3 });
+        assert_eq!(end, TerminalPosition { row: 5, col: 10 });
+    }
+
+    #[test]
+    fn ordered_swaps_when_same_row_and_cursor_col_before_anchor_col() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 3, col: 15 },
+            cursor: TerminalPosition { row: 3, col: 2 },
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, TerminalPosition { row: 3, col: 2 });
+        assert_eq!(end, TerminalPosition { row: 3, col: 15 });
+    }
+
+    #[test]
+    fn ordered_preserves_order_when_same_position() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 4, col: 7 },
+            cursor: TerminalPosition { row: 4, col: 7 },
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, TerminalPosition { row: 4, col: 7 });
+        assert_eq!(end, TerminalPosition { row: 4, col: 7 });
+    }
+
+    #[test]
+    fn contains_single_line_includes_cells_within_range() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 2, col: 5 },
+            cursor: TerminalPosition { row: 2, col: 10 },
+        };
+        assert!(sel.contains(2, 5));
+        assert!(sel.contains(2, 7));
+        assert!(sel.contains(2, 10));
+        assert!(!sel.contains(2, 4));
+        assert!(!sel.contains(2, 11));
+        assert!(!sel.contains(1, 7));
+        assert!(!sel.contains(3, 7));
+    }
+
+    #[test]
+    fn contains_multiline_first_row_from_start_col_to_end() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 1, col: 5 },
+            cursor: TerminalPosition { row: 3, col: 10 },
+        };
+        // First row: col >= 5
+        assert!(sel.contains(1, 5));
+        assert!(sel.contains(1, 100));
+        assert!(!sel.contains(1, 4));
+    }
+
+    #[test]
+    fn contains_multiline_middle_rows_fully_selected() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 1, col: 5 },
+            cursor: TerminalPosition { row: 4, col: 10 },
+        };
+        // Middle rows (2 and 3): fully selected
+        assert!(sel.contains(2, 0));
+        assert!(sel.contains(2, 999));
+        assert!(sel.contains(3, 0));
+        assert!(sel.contains(3, 999));
+    }
+
+    #[test]
+    fn contains_multiline_last_row_from_start_to_end_col() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 1, col: 5 },
+            cursor: TerminalPosition { row: 3, col: 10 },
+        };
+        // Last row: col <= 10
+        assert!(sel.contains(3, 0));
+        assert!(sel.contains(3, 10));
+        assert!(!sel.contains(3, 11));
+    }
+
+    #[test]
+    fn contains_excludes_rows_outside_selection() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 2, col: 5 },
+            cursor: TerminalPosition { row: 4, col: 10 },
+        };
+        assert!(!sel.contains(0, 5));
+        assert!(!sel.contains(1, 5));
+        assert!(!sel.contains(5, 5));
+    }
+
+    #[test]
+    fn is_empty_returns_true_when_anchor_equals_cursor() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 3, col: 7 },
+            cursor: TerminalPosition { row: 3, col: 7 },
+        };
+        assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn is_empty_returns_false_when_positions_differ_by_col() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 3, col: 7 },
+            cursor: TerminalPosition { row: 3, col: 8 },
+        };
+        assert!(!sel.is_empty());
+    }
+
+    #[test]
+    fn is_empty_returns_false_when_positions_differ_by_row() {
+        let sel = TextSelection {
+            anchor: TerminalPosition { row: 3, col: 7 },
+            cursor: TerminalPosition { row: 4, col: 7 },
+        };
+        assert!(!sel.is_empty());
     }
 }

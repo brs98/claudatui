@@ -353,7 +353,7 @@ impl SearchModal<'_> {
                     .conversation
                     .project_path
                     .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
+                    .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "Unknown".to_string());
 
                 let display = result

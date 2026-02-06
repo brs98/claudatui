@@ -139,7 +139,7 @@ impl WhichKeyConfig {
                         (1..=9)
                             .map(|i| {
                                 LeaderCommand::action(
-                                    char::from_digit(i, 10).unwrap(),
+                                    char::from_digit(i, 10).expect("digit index is in range 1..=9"),
                                     format!("slot {}", i),
                                     LeaderAction::BookmarkSet(i as u8),
                                 )
@@ -153,7 +153,7 @@ impl WhichKeyConfig {
                         (1..=9)
                             .map(|i| {
                                 LeaderCommand::action(
-                                    char::from_digit(i, 10).unwrap(),
+                                    char::from_digit(i, 10).expect("digit index is in range 1..=9"),
                                     format!("slot {}", i),
                                     LeaderAction::BookmarkDelete(i as u8),
                                 )
@@ -214,9 +214,10 @@ impl WhichKeyConfig {
         };
 
         match commands.iter().find(|cmd| cmd.key == key) {
-            Some(cmd) if cmd.action.is_some() => {
-                LeaderKeyResult::Execute(cmd.action.clone().unwrap())
-            }
+            Some(LeaderCommand {
+                action: Some(action),
+                ..
+            }) => LeaderKeyResult::Execute(action.clone()),
             Some(cmd) if !cmd.subcommands.is_empty() => LeaderKeyResult::Submenu,
             _ => LeaderKeyResult::Cancel, // Invalid key
         }
@@ -261,7 +262,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_commands_at_root() {
+    fn commands_at_root_includes_bookmark_and_search_keys() {
         let config = WhichKeyConfig::new();
         let commands = config.commands_at_path(&[]).unwrap();
         assert!(!commands.is_empty());
@@ -270,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commands_at_bookmark_path() {
+    fn commands_at_bookmark_path_includes_slot_and_mark_keys() {
         let config = WhichKeyConfig::new();
         let commands = config.commands_at_path(&['b']).unwrap();
         assert!(commands.iter().any(|c| c.key == '1'));
@@ -278,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_key_action() {
+    fn process_key_executes_bookmark_jump_for_slot_key() {
         let config = WhichKeyConfig::new();
         match config.process_key(&['b'], '1') {
             LeaderKeyResult::Execute(LeaderAction::BookmarkJump(1)) => {}
@@ -287,19 +288,19 @@ mod tests {
     }
 
     #[test]
-    fn test_process_key_submenu() {
+    fn process_key_returns_submenu_for_group_key() {
         let config = WhichKeyConfig::new();
         assert_eq!(config.process_key(&[], 'b'), LeaderKeyResult::Submenu);
     }
 
     #[test]
-    fn test_process_key_invalid() {
+    fn process_key_cancels_for_unbound_key() {
         let config = WhichKeyConfig::new();
         assert_eq!(config.process_key(&[], 'z'), LeaderKeyResult::Cancel);
     }
 
     #[test]
-    fn test_submenu_title() {
+    fn submenu_title_returns_correct_label_for_each_path() {
         let config = WhichKeyConfig::new();
         assert_eq!(config.submenu_title(&[]), "Leader");
         assert_eq!(config.submenu_title(&['b']), "Bookmarks");

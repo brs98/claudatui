@@ -23,10 +23,10 @@ pub struct ManagedSession {
     /// Unique session ID (internal to this process).
     pub session_id: SessionId,
     /// Working directory.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "planned for future use")]
     working_dir: String,
     /// Claude conversation ID if resuming.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "planned for future use")]
     claude_session_id: Option<String>,
     /// PTY pair.
     pair: PtyPair,
@@ -120,8 +120,8 @@ impl ManagedSession {
 
         Ok(Self {
             session_id,
-            working_dir: working_dir.to_string_lossy().to_string(),
-            claude_session_id: claude_session_id.map(|s| s.to_string()),
+            working_dir: working_dir.to_string_lossy().into_owned(),
+            claude_session_id: claude_session_id.map(ToString::to_string),
             pair,
             writer,
             output_rx,
@@ -299,7 +299,7 @@ impl SessionManager {
 
     /// Get the session state for rendering.
     pub fn get_session_state(&self, session_id: &str) -> Option<SessionState> {
-        self.sessions.get(session_id).map(|s| s.state())
+        self.sessions.get(session_id).map(ManagedSession::state)
     }
 
     /// Process output for all sessions.
