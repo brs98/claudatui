@@ -1384,6 +1384,24 @@ impl App {
         // Clean up dead sessions from the session manager
         let dead_sessions = self.session_manager.cleanup_dead();
 
+        // Before destroying ephemeral data, give unmatched ephemerals one last
+        // chance to match a persisted conversation. Without this, the race
+        // between cleanup and session-index reload causes the conversation to
+        // disappear when `hide_inactive` is on.
+        let has_unmatched_dead_ephemerals = dead_sessions.iter().any(|sid| {
+            self.ephemeral_sessions.contains_key(sid)
+                && self
+                    .session_to_claude_id
+                    .get(sid)
+                    .map(Option::is_none)
+                    .unwrap_or(false)
+        });
+
+        if has_unmatched_dead_ephemerals {
+            let _ = self.load_conversations_preserve_order();
+            self.cleanup_persisted_ephemeral_sessions();
+        }
+
         for session_id in dead_sessions {
             // Get the Claude session ID before removing from our mapping
             let claude_id = self.session_to_claude_id.remove(&session_id);
@@ -1405,6 +1423,7 @@ impl App {
             if self.active_session_id.as_ref() == Some(&session_id) {
                 self.active_session_id = None;
                 self.session_state_cache = None;
+                self.toast_info("Session ended");
                 // Return focus to sidebar when viewed session closes
                 if matches!(self.focus, Focus::Terminal(_)) {
                     self.focus = Focus::Sidebar;
@@ -1497,7 +1516,7 @@ impl App {
             .collect();
 
         // Track which Claude session IDs are already claimed by a daemon
-        let claimed_ids: HashSet<String> = self
+        let mut claimed_ids: HashSet<String> = self
             .session_to_claude_id
             .values()
             .filter_map(Clone::clone)
@@ -1535,9 +1554,14 @@ impl App {
                 .min_by_key(|c| c.timestamp); // Oldest matching = most likely match
 
             if let Some(conv) = matching_conv {
+                let conv_session_id = conv.session_id.clone();
+
                 // Update the daemon → Claude ID mapping
                 self.session_to_claude_id
-                    .insert(daemon_id.clone(), Some(conv.session_id.clone()));
+                    .insert(daemon_id.clone(), Some(conv_session_id.clone()));
+
+                // Mark this conversation as claimed so no other ephemeral can match it
+                claimed_ids.insert(conv_session_id);
 
                 // If this is the active session, update selected_conversation
                 if self.active_session_id.as_ref() == Some(&daemon_id) {
