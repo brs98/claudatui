@@ -45,14 +45,8 @@ pub fn create_layout_with_help_config(area: Rect, config: &LayoutConfig) -> (Rec
     let constraints = if config.sidebar_minimized {
         // For minimized, use fixed width
         match config.sidebar_position {
-            SidebarPosition::Left => [
-                Constraint::Length(sidebar_width),
-                Constraint::Min(0),
-            ],
-            SidebarPosition::Right => [
-                Constraint::Min(0),
-                Constraint::Length(sidebar_width),
-            ],
+            SidebarPosition::Left => [Constraint::Length(sidebar_width), Constraint::Min(0)],
+            SidebarPosition::Right => [Constraint::Min(0), Constraint::Length(sidebar_width)],
         }
     } else {
         match config.sidebar_position {

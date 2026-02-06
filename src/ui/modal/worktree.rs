@@ -148,8 +148,7 @@ impl Widget for WorktreeModal<'_> {
         .split(inner);
 
         // Label
-        let label = Paragraph::new("Branch name:")
-            .style(Style::default().fg(Color::White));
+        let label = Paragraph::new("Branch name:").style(Style::default().fg(Color::White));
         label.render(chunks[0], buf);
 
         // Input field with border
@@ -202,9 +201,19 @@ impl Widget for WorktreeModal<'_> {
 
         // Help bar
         let help = Paragraph::new(Line::from(vec![
-            Span::styled(" Enter ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Enter ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("create "),
-            Span::styled(" Esc ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Esc ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("cancel"),
         ]))
         .style(Style::default().fg(Color::DarkGray))

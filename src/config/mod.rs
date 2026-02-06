@@ -57,12 +57,12 @@ impl Config {
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory: {}", parent.display())
+            })?;
         }
 
-        let contents = serde_json::to_string_pretty(self)
-            .context("Failed to serialize config")?;
+        let contents = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
 
         fs::write(&path, contents)
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
@@ -72,8 +72,7 @@ impl Config {
 
     /// Get the path to the config file
     fn config_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .context("Could not find config directory")?;
+        let config_dir = dirs::config_dir().context("Could not find config directory")?;
 
         Ok(config_dir.join("claudatui").join("config.json"))
     }
@@ -176,6 +175,9 @@ mod tests {
         let config = Config::default();
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.layout.sidebar_width_pct, config.layout.sidebar_width_pct);
+        assert_eq!(
+            parsed.layout.sidebar_width_pct,
+            config.layout.sidebar_width_pct
+        );
     }
 }

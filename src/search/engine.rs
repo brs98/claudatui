@@ -19,11 +19,7 @@ impl SearchEngine {
     }
 
     /// Search conversations by content (title/summary).
-    pub fn search_content(
-        &self,
-        query: &str,
-        groups: &[ConversationGroup],
-    ) -> Vec<SearchResult> {
+    pub fn search_content(&self, query: &str, groups: &[ConversationGroup]) -> Vec<SearchResult> {
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
 
@@ -55,11 +51,7 @@ impl SearchEngine {
     }
 
     /// Search conversations by project path.
-    pub fn search_project(
-        &self,
-        query: &str,
-        groups: &[ConversationGroup],
-    ) -> Vec<SearchResult> {
+    pub fn search_project(&self, query: &str, groups: &[ConversationGroup]) -> Vec<SearchResult> {
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
 
@@ -90,11 +82,7 @@ impl SearchEngine {
     }
 
     /// Combined search with all filters.
-    pub fn search(
-        &self,
-        query: &SearchQuery,
-        groups: &[ConversationGroup],
-    ) -> Vec<SearchResult> {
+    pub fn search(&self, query: &SearchQuery, groups: &[ConversationGroup]) -> Vec<SearchResult> {
         if query.is_empty() {
             return Vec::new();
         }
@@ -107,7 +95,10 @@ impl SearchEngine {
 
                 // Add project results that aren't already in content results
                 for result in project_results {
-                    if !results.iter().any(|r| r.conversation.session_id == result.conversation.session_id) {
+                    if !results
+                        .iter()
+                        .any(|r| r.conversation.session_id == result.conversation.session_id)
+                    {
                         results.push(result);
                     }
                 }

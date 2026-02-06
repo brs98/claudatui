@@ -82,7 +82,11 @@ pub fn detect_repo_info(project_path: &Path) -> Option<RepoInfo> {
                 // Navigate from .git/worktrees/<name> back to the repo root
                 // gitdir_path = /repo/.git/worktrees/<name>
                 // parent three times: worktrees -> .git -> repo root
-                if let Some(repo_root) = gitdir_path.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+                if let Some(repo_root) = gitdir_path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.parent())
+                {
                     let branch = gitdir_path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -100,7 +104,10 @@ pub fn detect_repo_info(project_path: &Path) -> Option<RepoInfo> {
     // The parent should be a bare repo (has HEAD + refs at its root).
     if let Some(parent) = project_path.parent() {
         let parent_str = parent.to_string_lossy();
-        if parent_str.ends_with(".git") && parent.join("HEAD").exists() && parent.join("refs").is_dir() {
+        if parent_str.ends_with(".git")
+            && parent.join("HEAD").exists()
+            && parent.join("refs").is_dir()
+        {
             let branch = project_path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -129,10 +136,15 @@ pub fn create_worktree(repo_info: &RepoInfo, branch_name: &str) -> Result<PathBu
         // Bare repo: place inside the bare repo dir
         repo_path.join(branch_name)
     } else {
-        // Normal repo: place as a sibling directory
+        // Normal repo: place as a sibling directory, prefixed with repo name
+        // e.g., /work/myrepo + branch "feat" → /work/myrepo-feat
+        let repo_name = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "repo".to_string());
         repo_path
             .parent()
-            .map(|p| p.join(branch_name))
+            .map(|p| p.join(format!("{}-{}", repo_name, branch_name)))
             .context("Cannot determine parent directory for worktree")?
     };
 
