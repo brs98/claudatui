@@ -5,8 +5,10 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget},
 };
+
+use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app::EphemeralSession;
 use crate::bookmarks::BookmarkManager;
@@ -40,6 +42,12 @@ pub struct SidebarState {
     pub hide_inactive: bool,
     /// Current archive filter mode
     pub archive_filter: ArchiveFilter,
+    /// Current inline filter query text
+    pub filter_query: String,
+    /// Cursor position within the filter input
+    pub filter_cursor_pos: usize,
+    /// Whether the filter input is actively accepting keystrokes
+    pub filter_active: bool,
 }
 
 impl SidebarState {
@@ -90,6 +98,85 @@ impl SidebarState {
             ArchiveFilter::All => format!(" {} (all) ", base_title),
         }
     }
+
+    /// Activate the inline filter input (enter insert mode on filter)
+    pub fn activate_filter(&mut self) {
+        self.filter_active = true;
+        self.filter_cursor_pos = self.filter_query.len();
+    }
+
+    /// Deactivate the filter input (keep text visible but stop accepting keystrokes)
+    pub fn deactivate_filter(&mut self) {
+        self.filter_active = false;
+    }
+
+    /// Clear the filter entirely (text, cursor, active state)
+    pub fn clear_filter(&mut self) {
+        self.filter_query.clear();
+        self.filter_cursor_pos = 0;
+        self.filter_active = false;
+    }
+
+    /// Whether there is a non-empty filter query
+    pub fn has_filter(&self) -> bool {
+        !self.filter_query.is_empty()
+    }
+
+    /// Handle a key event while the filter input is active
+    pub fn handle_filter_key(&mut self, key: KeyEvent) -> FilterKeyResult {
+        match key.code {
+            KeyCode::Char(c) => {
+                self.filter_query.insert(self.filter_cursor_pos, c);
+                self.filter_cursor_pos += 1;
+                FilterKeyResult::QueryChanged
+            }
+            KeyCode::Backspace => {
+                if self.filter_cursor_pos > 0 {
+                    self.filter_cursor_pos -= 1;
+                    self.filter_query.remove(self.filter_cursor_pos);
+                    FilterKeyResult::QueryChanged
+                } else {
+                    FilterKeyResult::Continue
+                }
+            }
+            KeyCode::Delete => {
+                if self.filter_cursor_pos < self.filter_query.len() {
+                    self.filter_query.remove(self.filter_cursor_pos);
+                    FilterKeyResult::QueryChanged
+                } else {
+                    FilterKeyResult::Continue
+                }
+            }
+            KeyCode::Left => {
+                self.filter_cursor_pos = self.filter_cursor_pos.saturating_sub(1);
+                FilterKeyResult::Continue
+            }
+            KeyCode::Right => {
+                self.filter_cursor_pos = (self.filter_cursor_pos + 1).min(self.filter_query.len());
+                FilterKeyResult::Continue
+            }
+            KeyCode::Home => {
+                self.filter_cursor_pos = 0;
+                FilterKeyResult::Continue
+            }
+            KeyCode::End => {
+                self.filter_cursor_pos = self.filter_query.len();
+                FilterKeyResult::Continue
+            }
+            KeyCode::Enter => FilterKeyResult::Deactivated,
+            _ => FilterKeyResult::Continue,
+        }
+    }
+}
+
+/// Result of processing a key in the filter input
+pub enum FilterKeyResult {
+    /// No visual change needed
+    Continue,
+    /// Query text changed — re-filter and reset selection
+    QueryChanged,
+    /// Enter pressed — exit insert mode, keep filter text visible
+    Deactivated,
 }
 
 /// Sidebar widget for displaying conversations
@@ -106,9 +193,16 @@ pub struct Sidebar<'a> {
     archive_filter: ArchiveFilter,
     /// Bookmark manager for displaying bookmarks
     bookmark_manager: &'a BookmarkManager,
+    /// Current filter query text (empty = no filter)
+    filter_query: &'a str,
+    /// Whether the filter input is actively accepting keystrokes
+    filter_active: bool,
+    /// Cursor position within the filter input (only used when filter_active)
+    filter_cursor_pos: usize,
 }
 
 impl<'a> Sidebar<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         groups: &'a [ConversationGroup],
         focused: bool,
@@ -117,6 +211,9 @@ impl<'a> Sidebar<'a> {
         hide_inactive: bool,
         archive_filter: ArchiveFilter,
         bookmark_manager: &'a BookmarkManager,
+        filter_query: &'a str,
+        filter_active: bool,
+        filter_cursor_pos: usize,
     ) -> Self {
         Self {
             groups,
@@ -126,6 +223,9 @@ impl<'a> Sidebar<'a> {
             hide_inactive,
             archive_filter,
             bookmark_manager,
+            filter_query,
+            filter_active,
+            filter_cursor_pos,
         }
     }
 }
@@ -156,6 +256,35 @@ impl<'a> StatefulWidget for Sidebar<'a> {
         let inner_area = block.inner(area);
         block.render(area, buf);
 
+        // Split inner area: filter row at top (when visible), list below
+        let show_filter_row = self.filter_active || !self.filter_query.is_empty();
+        let (filter_area, list_area) = if show_filter_row && inner_area.height > 1 {
+            (
+                Rect {
+                    height: 1,
+                    ..inner_area
+                },
+                Rect {
+                    y: inner_area.y + 1,
+                    height: inner_area.height - 1,
+                    ..inner_area
+                },
+            )
+        } else {
+            (Rect::default(), inner_area)
+        };
+
+        // Render filter input row
+        if show_filter_row && filter_area.height > 0 {
+            render_filter_row(
+                filter_area,
+                buf,
+                self.filter_query,
+                self.filter_active,
+                self.filter_cursor_pos,
+            );
+        }
+
         let selected_index = state.list_state.selected();
         let items = build_list_items(
             self.groups,
@@ -168,6 +297,7 @@ impl<'a> StatefulWidget for Sidebar<'a> {
             self.archive_filter,
             selected_index,
             self.bookmark_manager,
+            self.filter_query,
         );
         let list = List::new(items)
             .highlight_style(
@@ -177,7 +307,61 @@ impl<'a> StatefulWidget for Sidebar<'a> {
             )
             .highlight_symbol("> ");
 
-        StatefulWidget::render(list, inner_area, buf, &mut state.list_state);
+        StatefulWidget::render(list, list_area, buf, &mut state.list_state);
+    }
+}
+
+/// Render the inline filter input row at the top of the sidebar
+fn render_filter_row(
+    area: Rect,
+    buf: &mut Buffer,
+    query: &str,
+    active: bool,
+    cursor_pos: usize,
+) {
+    let prefix = "/ ";
+    let prefix_len = prefix.len();
+
+    if active {
+        // Active: show prefix + query with cursor highlight
+        let mut spans = vec![Span::styled(prefix, Style::default().fg(Color::Yellow))];
+
+        let available_width = (area.width as usize).saturating_sub(prefix_len);
+        let (visible_text, cursor_offset) = if query.len() <= available_width {
+            (query, cursor_pos)
+        } else {
+            let start = if cursor_pos >= available_width {
+                cursor_pos - available_width + 1
+            } else {
+                0
+            };
+            let end = (start + available_width).min(query.len());
+            (&query[start..end], cursor_pos - start)
+        };
+
+        for (i, c) in visible_text.chars().enumerate() {
+            if i == cursor_offset {
+                spans.push(Span::styled(
+                    c.to_string(),
+                    Style::default().bg(Color::White).fg(Color::Black),
+                ));
+            } else {
+                spans.push(Span::raw(c.to_string()));
+            }
+        }
+        // Block cursor at end of text
+        if cursor_offset >= visible_text.len() {
+            spans.push(Span::styled(" ", Style::default().bg(Color::White)));
+        }
+
+        Paragraph::new(Line::from(spans)).render(area, buf);
+    } else {
+        // Inactive (persistent display): dimmed style, no cursor
+        let line = Line::from(vec![
+            Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+            Span::styled(query, Style::default().fg(Color::DarkGray)),
+        ]);
+        Paragraph::new(line).render(area, buf);
     }
 }
 
@@ -193,9 +377,14 @@ fn build_list_items(
     archive_filter: ArchiveFilter,
     selected_index: Option<usize>,
     bookmark_manager: &BookmarkManager,
+    filter_query: &str,
 ) -> Vec<ListItem<'static>> {
     let mut items = Vec::new();
     let mut current_index: usize = 0;
+
+    // Prepare case-insensitive filter query
+    let filter_lower = filter_query.to_lowercase();
+    let has_text_filter = !filter_lower.is_empty();
 
     // Render bookmarks section at the top
     let bookmarks = bookmark_manager.get_all();
@@ -252,14 +441,21 @@ fn build_list_items(
             continue;
         }
 
-        // Check if group has any conversations visible with current archive filter
+        // When text filter is active, check if group name matches or any conversation matches
+        let group_name_matches = has_text_filter
+            && group.display_name().to_lowercase().contains(&filter_lower);
+
+        // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {
             !conv.is_plan_implementation
                 && should_show_conversation(conv, archive_filter, running_sessions, hide_inactive)
+                && (!has_text_filter
+                    || group_name_matches
+                    || conv_matches_filter(conv, &filter_lower))
         });
 
-        // Skip groups with no visible conversations (unless showing all)
-        if !has_visible_conversations && archive_filter != ArchiveFilter::All {
+        // Skip groups with no visible conversations (unless showing all and no text filter)
+        if !has_visible_conversations && (archive_filter != ArchiveFilter::All || has_text_filter) {
             continue;
         }
 
@@ -317,13 +513,18 @@ fn build_list_items(
             }
 
             // Get all conversations and filter out plan implementations
-            // Also filter by archive status and inactive if hide_inactive is enabled
+            // Also filter by archive status, inactive, and text filter
             let conversations = group.conversations();
             let filtered_convos: Vec<_> = conversations
                 .iter()
                 .filter(|conv| !conv.is_plan_implementation)
                 .filter(|conv| {
                     should_show_conversation(conv, archive_filter, running_sessions, hide_inactive)
+                })
+                .filter(|conv| {
+                    !has_text_filter
+                        || group_name_matches
+                        || conv_matches_filter(conv, &filter_lower)
                 })
                 .collect();
 
@@ -451,6 +652,18 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Check if a conversation matches the text filter (case-insensitive)
+fn conv_matches_filter(
+    conv: &crate::claude::conversation::Conversation,
+    filter_lower: &str,
+) -> bool {
+    conv.display.to_lowercase().contains(filter_lower)
+        || conv
+            .summary
+            .as_ref()
+            .is_some_and(|s| s.to_lowercase().contains(filter_lower))
+}
+
 /// Check if a conversation should be shown based on archive filter and other criteria
 fn should_show_conversation(
     conv: &crate::claude::conversation::Conversation,
@@ -562,8 +775,12 @@ pub fn build_sidebar_items(
     hide_inactive: bool,
     archive_filter: ArchiveFilter,
     bookmark_manager: &BookmarkManager,
+    filter_query: &str,
 ) -> Vec<SidebarItem> {
     let mut items = Vec::new();
+
+    let filter_lower = filter_query.to_lowercase();
+    let has_text_filter = !filter_lower.is_empty();
 
     // Insert bookmark items at the top, mirroring build_list_items
     let bookmarks = bookmark_manager.get_all();
@@ -589,14 +806,21 @@ pub fn build_sidebar_items(
 
         let group_key = group.key();
 
-        // Check if group has any conversations visible with current archive filter
+        // When text filter is active, check if group name matches
+        let group_name_matches = has_text_filter
+            && group.display_name().to_lowercase().contains(&filter_lower);
+
+        // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {
             !conv.is_plan_implementation
                 && should_show_conversation(conv, archive_filter, running_sessions, hide_inactive)
+                && (!has_text_filter
+                    || group_name_matches
+                    || conv_matches_filter(conv, &filter_lower))
         });
 
-        // Skip groups with no visible conversations (unless showing all)
-        if !has_visible_conversations && archive_filter != ArchiveFilter::All {
+        // Skip groups with no visible conversations
+        if !has_visible_conversations && (archive_filter != ArchiveFilter::All || has_text_filter) {
             continue;
         }
 
@@ -624,7 +848,7 @@ pub fn build_sidebar_items(
             }
 
             // Get all conversations and filter out plan implementations
-            // Also filter by archive status and inactive if hide_inactive is enabled
+            // Also filter by archive status, inactive, and text filter
             // We keep track of original indices so lookup in app.rs still works
             let conversations = group.conversations();
             let filtered_indices: Vec<usize> = conversations
@@ -633,6 +857,11 @@ pub fn build_sidebar_items(
                 .filter(|(_, conv)| !conv.is_plan_implementation)
                 .filter(|(_, conv)| {
                     should_show_conversation(conv, archive_filter, running_sessions, hide_inactive)
+                })
+                .filter(|(_, conv)| {
+                    !has_text_filter
+                        || group_name_matches
+                        || conv_matches_filter(conv, &filter_lower)
                 })
                 .map(|(idx, _)| idx)
                 .collect();

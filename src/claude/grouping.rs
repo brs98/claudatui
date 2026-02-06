@@ -113,8 +113,34 @@ fn extract_group_key(project_path: &str) -> GroupKey {
         };
     }
 
-    // Pattern 2: Regular directory - group by parent/project
+    // Pattern 2: Non-bare worktree - .git is a file pointing to parent repo
     let path = Path::new(project_path);
+    let dot_git = path.join(".git");
+    if dot_git.is_file() {
+        if let Ok(contents) = std::fs::read_to_string(&dot_git) {
+            if let Some(gitdir) = contents.trim().strip_prefix("gitdir: ") {
+                let gitdir_path = PathBuf::from(gitdir);
+                // gitdir_path = /repo/.git/worktrees/<name>
+                // Navigate up to repo root: worktrees -> .git -> repo
+                if let Some(repo_root) = gitdir_path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.parent())
+                {
+                    let branch = gitdir_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    return GroupKey::Worktree {
+                        repo_path: repo_root.to_path_buf(),
+                        branch,
+                    };
+                }
+            }
+        }
+    }
+
+    // Pattern 3: Regular directory - group by parent/project
     if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
         if let Some(parent_name) = parent.file_name() {
             return GroupKey::Directory {

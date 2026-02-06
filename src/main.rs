@@ -29,8 +29,8 @@ use claudatui::input::InputMode;
 use claudatui::input::which_key::{LeaderAction, LeaderKeyResult};
 use app::{App, ChordState, EscapeSequenceState, Focus, ModalState, TerminalPosition, TextSelection};
 use ui::layout::create_layout_with_help_config;
-use ui::modal::{NewProjectModal, SearchKeyResult, SearchModal};
-use ui::sidebar::Sidebar;
+use ui::modal::{NewProjectModal, SearchKeyResult, SearchModal, WorktreeModal};
+use ui::sidebar::{FilterKeyResult, Sidebar};
 use ui::terminal_pane::TerminalPane;
 use ui::toast_widget::{ToastPosition, ToastWidget};
 use ui::WhichKeyWidget;
@@ -200,14 +200,30 @@ fn handle_key_event(
         app.clear_selection();
     }
 
-    // 1. Insert mode - handle modal or terminal passthrough with jk/kj escape detection
+    // 0.5. True global keybindings — must work even in Insert mode
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(KeyAction::Quit),
+        (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
+            app.exit_insert_mode();
+            return Ok(KeyAction::Continue);
+        }
+        (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
+            app.enter_insert_mode();
+            return Ok(KeyAction::Continue);
+        }
+        _ => {}
+    }
+
+    // 1. Insert mode - handle filter, modal, or terminal passthrough with jk/kj escape detection
     if matches!(app.input_mode, InputMode::Insert) {
-        if app.is_modal_open() {
+        if app.is_sidebar_filter_active() {
+            return handle_filter_insert_with_escape_seq(app, key);
+        } else if app.is_modal_open() {
             return handle_modal_insert_with_escape_seq(app, key);
         } else if matches!(app.focus, Focus::Terminal(_)) {
             return handle_terminal_insert_with_escape_seq(app, key);
         }
-        // Fallback: if in insert mode but not in modal or terminal, exit insert mode
+        // Fallback: if in insert mode but not in filter, modal, or terminal, exit insert mode
         app.exit_insert_mode();
     }
 
@@ -216,23 +232,14 @@ fn handle_key_event(
         return handle_leader_key(app, key);
     }
 
-    // 3. Global keybindings (Ctrl+Q, etc.)
+    // 3. Normal-mode keybindings (Ctrl+Q handled above in true globals)
     match (key.code, key.modifiers) {
-        (KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(KeyAction::Quit),
         (KeyCode::Char('q'), KeyModifiers::NONE) if app.focus == Focus::Sidebar => {
             return Ok(KeyAction::Quit);
         }
         // Hot reload: Ctrl+Shift+B (B for Build)
         (KeyCode::Char('B'), KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
             return Ok(KeyAction::HotReload);
-        }
-        (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
-            app.exit_insert_mode();
-            return Ok(KeyAction::Continue);
-        }
-        (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
-            app.enter_insert_mode();
-            return Ok(KeyAction::Continue);
         }
         // Cycle between active projects (works from any pane)
         (KeyCode::Char('.'), KeyModifiers::ALT) => {
@@ -390,6 +397,9 @@ fn execute_leader_action(app: &mut App, action: LeaderAction) -> Result<()> {
         LeaderAction::AddConversation => {
             // Open selected group and start new conversation
             app.open_selected()?;
+        }
+        LeaderAction::CreateWorktree => {
+            app.open_worktree_modal();
         }
     }
     Ok(())
@@ -555,6 +565,52 @@ fn handle_modal_insert_with_escape_seq(app: &mut App, key: KeyEvent) -> Result<K
     Ok(KeyAction::Continue)
 }
 
+/// Handle sidebar filter insert mode with jk/kj escape sequence detection
+fn handle_filter_insert_with_escape_seq(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    // Escape always clears the filter
+    if key.code == KeyCode::Esc {
+        app.clear_sidebar_filter();
+        return Ok(KeyAction::Continue);
+    }
+
+    match try_escape_sequence(app, key) {
+        EscapeSeqResult::Buffered => {
+            // Key buffered, waiting for second key or timeout
+        }
+        EscapeSeqResult::Escaped => {
+            // jk/kj detected — clear filter and return to normal
+            app.clear_sidebar_filter();
+        }
+        EscapeSeqResult::FlushBuffered(buffered) => {
+            forward_key_to_filter(app, buffered);
+        }
+        EscapeSeqResult::FlushAndProcess(buffered, current) => {
+            forward_key_to_filter(app, buffered);
+            forward_key_to_filter(app, current);
+        }
+        EscapeSeqResult::PassThrough => {
+            forward_key_to_filter(app, key);
+        }
+    }
+    Ok(KeyAction::Continue)
+}
+
+/// Forward a key event to the sidebar filter input
+fn forward_key_to_filter(app: &mut App, key: KeyEvent) {
+    match app.sidebar_state.handle_filter_key(key) {
+        FilterKeyResult::Continue => {}
+        FilterKeyResult::QueryChanged => {
+            // Reset selection to top and update
+            app.sidebar_state.list_state.select(Some(0));
+            app.update_selected_conversation();
+        }
+        FilterKeyResult::Deactivated => {
+            // Enter pressed — keep filter text, exit insert mode
+            app.deactivate_sidebar_filter();
+        }
+    }
+}
+
 /// Forward a key event to the currently open modal
 fn forward_key_to_modal(app: &mut App, key: KeyEvent) -> Result<()> {
     match &mut app.modal_state {
@@ -575,14 +631,21 @@ fn forward_key_to_modal(app: &mut App, key: KeyEvent) -> Result<()> {
                 }
             }
         }
+        ModalState::Worktree(ref mut state) => {
+            if let Some(branch_name) = state.handle_key(key) {
+                app.confirm_worktree(branch_name)?;
+            }
+        }
     }
     Ok(())
 }
 
-/// Flush a buffered escape sequence key to the appropriate target (PTY or modal)
+/// Flush a buffered escape sequence key to the appropriate target (filter, PTY, or modal)
 fn flush_buffered_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if matches!(app.input_mode, InputMode::Insert) {
-        if app.is_modal_open() {
+        if app.is_sidebar_filter_active() {
+            forward_key_to_filter(app, key);
+        } else if app.is_modal_open() {
             forward_key_to_modal(app, key)?;
         } else if matches!(app.focus, Focus::Terminal(_)) {
             let bytes = key_to_bytes(key);
@@ -696,9 +759,14 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
         }
 
         KeyCode::Esc => {
-            // Cancel any pending chord and clear preview
+            // Cancel any pending chord
             app.chord_state = ChordState::None;
-            app.clear_preview();
+            if app.sidebar_state.has_filter() {
+                // Clear persistent filter first
+                app.clear_sidebar_filter();
+            } else {
+                app.clear_preview();
+            }
         }
 
         // Enter insert mode and focus terminal
@@ -717,6 +785,12 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
         KeyCode::Char('u') => {
             let _ = app.unarchive_selected_conversation();
         }
+
+        // Worktree: create a new git worktree in selected group
+        KeyCode::Char('w') => app.open_worktree_modal(),
+
+        // Inline sidebar filter
+        KeyCode::Char('f') => app.activate_sidebar_filter(),
 
         // Preview: show session in terminal pane without leaving sidebar
         KeyCode::Char('p') => {
@@ -917,6 +991,11 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
     // Collect running session IDs for sidebar display
     let running_sessions = app.running_session_ids();
 
+    // Clone filter state to avoid overlapping borrows with render_stateful_widget
+    let filter_query = app.sidebar_state.filter_query.clone();
+    let filter_active = app.sidebar_state.filter_active;
+    let filter_cursor_pos = app.sidebar_state.filter_cursor_pos;
+
     // Draw sidebar with running session indicators and ephemeral sessions
     let sidebar = Sidebar::new(
         &app.groups,
@@ -926,6 +1005,9 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
         app.sidebar_state.hide_inactive,
         app.sidebar_state.archive_filter,
         &app.bookmark_manager,
+        &filter_query,
+        filter_active,
+        filter_cursor_pos,
     );
     f.render_stateful_widget(sidebar, sidebar_area, &mut app.sidebar_state);
 
@@ -1002,6 +1084,11 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
         ModalState::Search(ref mut state) => {
             let area = SearchModal::calculate_area(f.area());
             let modal = SearchModal::new(state);
+            f.render_widget(modal, area);
+        }
+        ModalState::Worktree(ref state) => {
+            let area = WorktreeModal::calculate_area(f.area());
+            let modal = WorktreeModal::new(state);
             f.render_widget(modal, area);
         }
     }
@@ -1098,28 +1185,62 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
     let mode_indicator = build_mode_indicator(app);
     let dangerous_indicator = build_dangerous_indicator(app);
 
+    // Filter-specific help bar hints
+    if app.sidebar_state.filter_active {
+        let help = Paragraph::new(Line::from(vec![
+            build_mode_indicator(app),
+            Span::styled(" Esc ", Style::default().fg(Color::Cyan)),
+            Span::raw("cancel "),
+            Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
+            Span::raw("keep filter "),
+            Span::styled(" jk ", Style::default().fg(Color::Cyan)),
+            Span::raw("cancel"),
+        ]))
+        .style(Style::default().bg(Color::DarkGray));
+        f.render_widget(help, area);
+        return;
+    }
+
     let help_text = match app.focus {
         Focus::Sidebar => {
             let mut spans = vec![mode_indicator];
             if let Some(danger) = dangerous_indicator {
                 spans.push(danger);
             }
-            spans.extend(vec![
-                Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
-                Span::raw("nav "),
-                Span::styled(" l ", Style::default().fg(Color::Cyan)),
-                Span::raw("terminal "),
-                Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
-                Span::raw("open "),
-                Span::styled(" SPC ", Style::default().fg(Color::Cyan)),
-                Span::raw("leader "),
-                Span::styled(" / ", Style::default().fg(Color::Cyan)),
-                Span::raw("search "),
-                Span::styled(" dd ", Style::default().fg(Color::Cyan)),
-                Span::raw("close "),
-                Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
-                Span::raw("quit"),
-            ]);
+            if app.sidebar_state.has_filter() {
+                // Persistent filter active — show filter-relevant hints
+                spans.extend(vec![
+                    Span::styled(" f ", Style::default().fg(Color::Cyan)),
+                    Span::raw("edit filter "),
+                    Span::styled(" Esc ", Style::default().fg(Color::Cyan)),
+                    Span::raw("clear filter "),
+                    Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
+                    Span::raw("nav "),
+                    Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
+                    Span::raw("open "),
+                    Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
+                    Span::raw("quit"),
+                ]);
+            } else {
+                spans.extend(vec![
+                    Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
+                    Span::raw("nav "),
+                    Span::styled(" l ", Style::default().fg(Color::Cyan)),
+                    Span::raw("terminal "),
+                    Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
+                    Span::raw("open "),
+                    Span::styled(" SPC ", Style::default().fg(Color::Cyan)),
+                    Span::raw("leader "),
+                    Span::styled(" / ", Style::default().fg(Color::Cyan)),
+                    Span::raw("search "),
+                    Span::styled(" f ", Style::default().fg(Color::Cyan)),
+                    Span::raw("filter "),
+                    Span::styled(" dd ", Style::default().fg(Color::Cyan)),
+                    Span::raw("close "),
+                    Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
+                    Span::raw("quit"),
+                ]);
+            }
             spans
         }
         Focus::Terminal(_) => {

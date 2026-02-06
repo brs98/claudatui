@@ -20,7 +20,7 @@ use crate::claude::grouping::{
 use crate::claude::sessions::{parse_all_sessions, SessionEntry};
 use crate::claude::SessionsWatcher;
 use crate::session::{ScreenState, SessionManager, SessionState};
-use crate::ui::modal::{NewProjectModalState, SearchModalState};
+use crate::ui::modal::{NewProjectModalState, SearchModalState, WorktreeModalState};
 use crate::ui::sidebar::{
     build_sidebar_items, group_has_active_content, SidebarItem, SidebarState,
 };
@@ -99,6 +99,8 @@ pub enum ModalState {
     NewProject(Box<NewProjectModalState>),
     /// Search modal is open
     Search(Box<SearchModalState>),
+    /// Worktree creation modal is open
+    Worktree(Box<WorktreeModalState>),
 }
 
 /// Split mode configuration
@@ -448,6 +450,7 @@ impl App {
             self.sidebar_state.hide_inactive,
             self.sidebar_state.archive_filter,
             &self.bookmark_manager,
+            &self.sidebar_state.filter_query,
         )
     }
 
@@ -885,7 +888,7 @@ impl App {
         }
     }
 
-    fn update_selected_conversation(&mut self) {
+    pub fn update_selected_conversation(&mut self) {
         let items = self.sidebar_items();
         let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
 
@@ -1872,37 +1875,100 @@ impl App {
         self.modal_state = ModalState::None;
 
         // Find the conversation in groups
+        let mut target: Option<(String, usize, Conversation)> = None;
         for group in &self.groups {
             for (conv_idx, conv) in group.conversations().iter().enumerate() {
                 if conv.session_id == session_id {
-                    // Expand the group
-                    self.sidebar_state.collapsed_groups.remove(&group.key());
-
-                    // Find the conversation in sidebar items
-                    let items = self.sidebar_items();
-                    let group_key = group.key();
-                    if let Some(item_idx) = items.iter().position(|item| {
-                        matches!(item, SidebarItem::Conversation { group_key: gk, index }
-                            if gk == &group_key && *index == conv_idx)
-                    }) {
-                        self.sidebar_state.list_state.select(Some(item_idx));
-                        self.update_selected_conversation();
-
-                        // Open the conversation
-                        self.open_selected()?;
-                        return Ok(true);
-                    }
+                    target = Some((group.key(), conv_idx, conv.clone()));
+                    break;
                 }
+            }
+            if target.is_some() {
+                break;
             }
         }
 
-        self.toast_error("Conversation not found");
-        Ok(false)
+        let Some((group_key, conv_idx, conv)) = target else {
+            self.toast_error("Conversation not found");
+            return Ok(false);
+        };
+
+        // Ensure the conversation is visible in the sidebar:
+        // 1. Uncollapse the group
+        self.sidebar_state.collapsed_groups.remove(&group_key);
+        // 2. Expand conversation list so it's not truncated
+        self.sidebar_state
+            .expanded_conversations
+            .insert(group_key.clone());
+        // 3. Show all projects in case this group is beyond the visible limit
+        self.sidebar_state.show_all_projects = true;
+
+        // Best-effort: select the conversation in the sidebar
+        let items = self.sidebar_items();
+        if let Some(item_idx) = items.iter().position(|item| {
+            matches!(item, SidebarItem::Conversation { group_key: gk, index }
+                if gk == &group_key && *index == conv_idx)
+        }) {
+            self.sidebar_state.list_state.select(Some(item_idx));
+        }
+        self.update_selected_conversation();
+
+        // Open the conversation directly (don't rely on open_selected which
+        // depends on the sidebar item being visible/selected)
+        let project_path = conv.project_path.clone();
+        if !project_path.exists() {
+            self.selected_conversation = Some(conv);
+            return Ok(true);
+        }
+
+        let existing_session = self
+            .session_to_claude_id
+            .iter()
+            .find(|(_, v)| **v == Some(session_id.to_string()))
+            .map(|(k, _)| k.clone());
+
+        if let Some(sid) = existing_session {
+            self.active_session_id = Some(sid);
+        } else {
+            self.start_session(&project_path, Some(session_id))?;
+        }
+        self.selected_conversation = Some(conv);
+        self.focus = Focus::Terminal(TerminalPaneId::Primary);
+        self.enter_insert_mode();
+        Ok(true)
     }
 
     /// Check if a modal is currently open
     pub fn is_modal_open(&self) -> bool {
         !matches!(self.modal_state, ModalState::None)
+    }
+
+    /// Activate the sidebar filter input and enter insert mode
+    pub fn activate_sidebar_filter(&mut self) {
+        self.sidebar_state.activate_filter();
+        self.input_mode = InputMode::Insert;
+        self.escape_seq_state = EscapeSequenceState::None;
+    }
+
+    /// Deactivate the sidebar filter input (keep text visible) and return to normal mode
+    pub fn deactivate_sidebar_filter(&mut self) {
+        self.sidebar_state.deactivate_filter();
+        self.input_mode = InputMode::Normal;
+        self.escape_seq_state = EscapeSequenceState::None;
+    }
+
+    /// Clear the sidebar filter entirely and return to normal mode
+    pub fn clear_sidebar_filter(&mut self) {
+        self.sidebar_state.clear_filter();
+        self.input_mode = InputMode::Normal;
+        self.escape_seq_state = EscapeSequenceState::None;
+        self.sidebar_state.list_state.select(Some(0));
+        self.update_selected_conversation();
+    }
+
+    /// Whether the sidebar filter input is currently active (accepting keystrokes)
+    pub fn is_sidebar_filter_active(&self) -> bool {
+        self.sidebar_state.filter_active
     }
 
     /// Confirm the new project modal selection and start a session
@@ -1916,6 +1982,98 @@ impl App {
         self.focus = Focus::Terminal(TerminalPaneId::Primary);
         self.enter_insert_mode();
 
+        Ok(())
+    }
+
+    /// Open the worktree creation modal for the currently selected group.
+    pub fn open_worktree_modal(&mut self) {
+        use crate::claude::worktree::detect_repo_info;
+
+        let items = self.sidebar_items();
+        let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
+
+        // Determine which group the cursor is in
+        let group_key = self.get_group_key_for_index(&items, selected);
+        let Some(key) = group_key else {
+            self.toast_error("Select a project group first");
+            return;
+        };
+
+        // Find a project path from the group
+        let project_path = self
+            .groups
+            .iter()
+            .find(|g| g.key() == key)
+            .and_then(|g| g.project_path());
+
+        let Some(path) = project_path else {
+            self.toast_error("No project path for this group");
+            return;
+        };
+
+        // Detect the repo type
+        let Some(repo_info) = detect_repo_info(&path) else {
+            self.toast_error("Not a git repository");
+            return;
+        };
+
+        let display_name = repo_info.display_name();
+        let state = WorktreeModalState::new(key, display_name);
+        self.modal_state = ModalState::Worktree(Box::new(state));
+        self.input_mode = InputMode::Insert;
+    }
+
+    /// Confirm worktree creation from the modal.
+    pub fn confirm_worktree(&mut self, branch_name: String) -> Result<()> {
+        use crate::claude::worktree::{create_worktree, detect_repo_info};
+
+        // Get the group key from the modal state
+        let group_key = match &self.modal_state {
+            ModalState::Worktree(state) => state.group_key.clone(),
+            _ => return Ok(()),
+        };
+
+        // Find the project path again
+        let project_path = self
+            .groups
+            .iter()
+            .find(|g| g.key() == group_key)
+            .and_then(|g| g.project_path());
+
+        let Some(path) = project_path else {
+            if let ModalState::Worktree(ref mut state) = self.modal_state {
+                state.error_message = Some("Group no longer exists".to_string());
+            }
+            return Ok(());
+        };
+
+        let Some(repo_info) = detect_repo_info(&path) else {
+            if let ModalState::Worktree(ref mut state) = self.modal_state {
+                state.error_message = Some("Not a git repository".to_string());
+            }
+            return Ok(());
+        };
+
+        match create_worktree(&repo_info, &branch_name) {
+            Ok(worktree_path) => {
+                // Close modal
+                self.modal_state = ModalState::None;
+
+                self.toast_success(format!("Worktree '{}' created", branch_name));
+
+                // Start a new conversation in the worktree
+                self.start_session(&worktree_path, None)?;
+                self.selected_conversation = None;
+                self.focus = Focus::Terminal(TerminalPaneId::Primary);
+                self.enter_insert_mode();
+            }
+            Err(e) => {
+                // Keep modal open with error
+                if let ModalState::Worktree(ref mut state) = self.modal_state {
+                    state.error_message = Some(format!("{}", e));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1971,9 +2129,10 @@ impl App {
         // Find the group
         let group_idx = self.groups.iter().position(|g| g.key() == group_key);
 
-        if let Some(_idx) = group_idx {
-            // Ensure group is expanded
+        if group_idx.is_some() {
+            // Ensure group is visible
             self.sidebar_state.collapsed_groups.remove(group_key);
+            self.sidebar_state.show_all_projects = true;
 
             // Find the group header in sidebar items
             let items = self.sidebar_items();
@@ -2002,8 +2161,12 @@ impl App {
         let group_idx = self.groups.iter().position(|g| g.key() == group_key);
 
         if let Some(gidx) = group_idx {
-            // Ensure group is expanded
+            // Ensure the conversation is visible in the sidebar
             self.sidebar_state.collapsed_groups.remove(group_key);
+            self.sidebar_state
+                .expanded_conversations
+                .insert(group_key.to_string());
+            self.sidebar_state.show_all_projects = true;
 
             // Find the conversation within the group
             let group = &self.groups[gidx];

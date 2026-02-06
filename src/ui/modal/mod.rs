@@ -2,6 +2,8 @@
 
 pub mod new_project;
 pub mod search;
+pub mod worktree;
 
 pub use new_project::{NewProjectModal, NewProjectModalState, NewProjectTab};
 pub use search::{SearchKeyResult, SearchModal, SearchModalState};
+pub use worktree::{WorktreeModal, WorktreeModalState};
