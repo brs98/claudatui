@@ -312,13 +312,7 @@ impl<'a> StatefulWidget for Sidebar<'a> {
 }
 
 /// Render the inline filter input row at the top of the sidebar
-fn render_filter_row(
-    area: Rect,
-    buf: &mut Buffer,
-    query: &str,
-    active: bool,
-    cursor_pos: usize,
-) {
+fn render_filter_row(area: Rect, buf: &mut Buffer, query: &str, active: bool, cursor_pos: usize) {
     let prefix = "/ ";
     let prefix_len = prefix.len();
 
@@ -442,8 +436,8 @@ fn build_list_items(
         }
 
         // When text filter is active, check if group name matches or any conversation matches
-        let group_name_matches = has_text_filter
-            && group.display_name().to_lowercase().contains(&filter_lower);
+        let group_name_matches =
+            has_text_filter && group.display_name().to_lowercase().contains(&filter_lower);
 
         // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {
@@ -464,11 +458,8 @@ fn build_list_items(
 
         // Check if this group is bookmarked
         let bookmark_slot = bookmark_manager.is_group_bookmarked(&group_key);
-        let star_indicator = if bookmark_slot.is_some() {
-            Span::styled(
-                format!(" [{}]", bookmark_slot.unwrap()),
-                Style::default().fg(Color::Yellow),
-            )
+        let star_indicator = if let Some(slot) = bookmark_slot {
+            Span::styled(format!(" [{}]", slot), Style::default().fg(Color::Yellow))
         } else {
             Span::raw("")
         };
@@ -728,7 +719,9 @@ pub fn group_has_active_content(
 #[derive(Debug, Clone)]
 pub enum SidebarItem {
     BookmarkHeader,
-    BookmarkEntry { slot: u8 },
+    BookmarkEntry {
+        slot: u8,
+    },
     BookmarkSeparator,
     GroupHeader {
         key: String,
@@ -759,7 +752,10 @@ impl SidebarItem {
     /// Whether this item can be selected/highlighted by the cursor.
     /// Non-interactive decorative items (headers, separators) return false.
     pub fn is_selectable(&self) -> bool {
-        !matches!(self, SidebarItem::BookmarkHeader | SidebarItem::BookmarkSeparator)
+        !matches!(
+            self,
+            SidebarItem::BookmarkHeader | SidebarItem::BookmarkSeparator
+        )
     }
 }
 
@@ -787,7 +783,9 @@ pub fn build_sidebar_items(
     if !bookmarks.is_empty() {
         items.push(SidebarItem::BookmarkHeader);
         for bookmark in bookmarks {
-            items.push(SidebarItem::BookmarkEntry { slot: bookmark.slot });
+            items.push(SidebarItem::BookmarkEntry {
+                slot: bookmark.slot,
+            });
         }
         items.push(SidebarItem::BookmarkSeparator);
     }
@@ -807,8 +805,8 @@ pub fn build_sidebar_items(
         let group_key = group.key();
 
         // When text filter is active, check if group name matches
-        let group_name_matches = has_text_filter
-            && group.display_name().to_lowercase().contains(&filter_lower);
+        let group_name_matches =
+            has_text_filter && group.display_name().to_lowercase().contains(&filter_lower);
 
         // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {

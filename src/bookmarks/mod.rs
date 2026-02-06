@@ -46,7 +46,11 @@ impl Bookmark {
     /// Create a new bookmark for a project
     pub fn new_project(slot: u8, name: String, project_path: PathBuf, group_key: String) -> Self {
         Self {
-            id: format!("bookmark_{}_{}", slot, chrono::Utc::now().timestamp_millis()),
+            id: format!(
+                "bookmark_{}_{}",
+                slot,
+                chrono::Utc::now().timestamp_millis()
+            ),
             slot,
             name,
             target: BookmarkTarget::Project {
@@ -66,7 +70,11 @@ impl Bookmark {
         group_key: String,
     ) -> Self {
         Self {
-            id: format!("bookmark_{}_{}", slot, chrono::Utc::now().timestamp_millis()),
+            id: format!(
+                "bookmark_{}_{}",
+                slot,
+                chrono::Utc::now().timestamp_millis()
+            ),
             slot,
             name,
             target: BookmarkTarget::Conversation {

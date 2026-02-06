@@ -25,9 +25,11 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use claudatui::input::InputMode;
+use app::{
+    App, ChordState, EscapeSequenceState, Focus, ModalState, TerminalPosition, TextSelection,
+};
 use claudatui::input::which_key::{LeaderAction, LeaderKeyResult};
-use app::{App, ChordState, EscapeSequenceState, Focus, ModalState, TerminalPosition, TextSelection};
+use claudatui::input::InputMode;
 use ui::layout::create_layout_with_help_config;
 use ui::modal::{NewProjectModal, SearchKeyResult, SearchModal, WorktreeModal};
 use ui::sidebar::{FilterKeyResult, Sidebar};
@@ -310,10 +312,7 @@ fn handle_leader_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
 
     // Check if this key completes a jk/kj escape sequence
     if let Some((first_key, started_at)) = pending_escape {
-        let is_complement = matches!(
-            (first_key, c),
-            ('j', 'k') | ('k', 'j')
-        );
+        let is_complement = matches!((first_key, c), ('j', 'k') | ('k', 'j'));
         if is_complement
             && started_at.elapsed().as_millis() as u64 <= crate::app::ESCAPE_SEQ_TIMEOUT_MS
         {
@@ -426,6 +425,7 @@ enum EscapeSeqResult {
 /// - If no pending state: buffer it (Buffered)
 /// - If pending with the complementary key: escape detected (Escaped)
 /// - If pending with the same key (jj/kk): flush old, buffer new (FlushBuffered)
+///
 /// When a non-trigger key is pressed:
 /// - If pending: flush buffered + process current (FlushAndProcess)
 /// - If no pending: pass through directly (PassThrough)
@@ -620,17 +620,15 @@ fn forward_key_to_modal(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.confirm_new_project(path)?;
             }
         }
-        ModalState::Search(ref mut state) => {
-            match state.handle_key(key) {
-                SearchKeyResult::Continue => {}
-                SearchKeyResult::QueryChanged => {
-                    app.perform_search();
-                }
-                SearchKeyResult::Selected(session_id) => {
-                    app.navigate_to_conversation(&session_id)?;
-                }
+        ModalState::Search(ref mut state) => match state.handle_key(key) {
+            SearchKeyResult::Continue => {}
+            SearchKeyResult::QueryChanged => {
+                app.perform_search();
             }
-        }
+            SearchKeyResult::Selected(session_id) => {
+                app.navigate_to_conversation(&session_id)?;
+            }
+        },
         ModalState::Worktree(ref mut state) => {
             if let Some(branch_name) = state.handle_key(key) {
                 app.confirm_worktree(branch_name)?;
@@ -829,7 +827,11 @@ fn handle_sidebar_enter(app: &mut App) -> Result<()> {
 /// Returns None if the position is outside the terminal inner area.
 fn screen_to_terminal_pos(app: &App, col: u16, row: u16) -> Option<TerminalPosition> {
     let inner = app.terminal_inner_area?;
-    if col < inner.x || col >= inner.x + inner.width || row < inner.y || row >= inner.y + inner.height {
+    if col < inner.x
+        || col >= inner.x + inner.width
+        || row < inner.y
+        || row >= inner.y + inner.height
+    {
         return None;
     }
     let t_col = (col - inner.x) as usize;
@@ -838,13 +840,20 @@ fn screen_to_terminal_pos(app: &App, col: u16, row: u16) -> Option<TerminalPosit
     // Clamp to actual screen state bounds
     if let Some(ref state) = app.session_state_cache {
         let max_row = state.screen.rows.len().saturating_sub(1);
-        let max_col = state.screen.rows.first().map_or(0, |r| r.cells.len().saturating_sub(1));
+        let max_col = state
+            .screen
+            .rows
+            .first()
+            .map_or(0, |r| r.cells.len().saturating_sub(1));
         Some(TerminalPosition {
             row: t_row.min(max_row),
             col: t_col.min(max_col),
         })
     } else {
-        Some(TerminalPosition { row: t_row, col: t_col })
+        Some(TerminalPosition {
+            row: t_row,
+            col: t_col,
+        })
     }
 }
 
@@ -986,7 +995,8 @@ fn perform_hot_reload() -> Result<String> {
 }
 
 fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
-    let (sidebar_area, terminal_area, help_area) = create_layout_with_help_config(f.area(), &app.config.layout);
+    let (sidebar_area, terminal_area, help_area) =
+        create_layout_with_help_config(f.area(), &app.config.layout);
 
     // Collect running session IDs for sidebar display
     let running_sessions = app.running_session_ids();
@@ -1024,7 +1034,12 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
     let session_state = app.get_session_state();
     let is_preview = app.preview_session_id.is_some() && app.focus == Focus::Sidebar;
     let selection = app.text_selection.as_ref();
-    let terminal_pane = TerminalPane::new(session_state, matches!(app.focus, Focus::Terminal(_)), is_preview, selection);
+    let terminal_pane = TerminalPane::new(
+        session_state,
+        matches!(app.focus, Focus::Terminal(_)),
+        is_preview,
+        selection,
+    );
     f.render_widget(terminal_pane, terminal_area);
 
     // Draw help bar or hot reload status

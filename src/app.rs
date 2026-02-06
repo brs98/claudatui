@@ -9,16 +9,16 @@ use ratatui::layout::Rect;
 
 use crate::bookmarks::{Bookmark, BookmarkManager, BookmarkTarget};
 use crate::claude::archive::ArchiveManager;
-use crate::config::{Config, SidebarPosition};
-use crate::input::{InputMode, LeaderState};
-use crate::input::which_key::WhichKeyConfig;
-use crate::search::SearchEngine;
 use crate::claude::conversation::{detect_status_fast, Conversation, ConversationStatus};
 use crate::claude::grouping::{
     group_conversations, group_conversations_unordered, order_groups_by_keys, ConversationGroup,
 };
 use crate::claude::sessions::{parse_all_sessions, SessionEntry};
 use crate::claude::SessionsWatcher;
+use crate::config::{Config, SidebarPosition};
+use crate::input::which_key::WhichKeyConfig;
+use crate::input::{InputMode, LeaderState};
+use crate::search::SearchEngine;
 use crate::session::{ScreenState, SessionManager, SessionState};
 use crate::ui::modal::{NewProjectModalState, SearchModalState, WorktreeModalState};
 use crate::ui::sidebar::{
@@ -107,7 +107,7 @@ pub enum ModalState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SplitMode {
     #[default]
-    None,       // Single pane (current behavior)
+    None, // Single pane (current behavior)
     Horizontal, // Side-by-side (left/right)
     Vertical,   // Stacked (top/bottom)
 }
@@ -127,7 +127,7 @@ impl SplitMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalPaneId {
     #[default]
-    Primary,   // Left or Top pane
+    Primary, // Left or Top pane
     Secondary, // Right or Bottom pane (only in split mode)
 }
 
@@ -164,8 +164,10 @@ pub enum Focus {
 }
 
 /// State for tracking jk/kj rapid-press escape sequence in insert mode
+#[derive(Default)]
 pub enum EscapeSequenceState {
     /// No pending escape key
+    #[default]
     None,
     /// First key of a potential escape sequence has been pressed
     Pending {
@@ -173,12 +175,6 @@ pub enum EscapeSequenceState {
         first_key_event: KeyEvent,
         started_at: Instant,
     },
-}
-
-impl Default for EscapeSequenceState {
-    fn default() -> Self {
-        EscapeSequenceState::None
-    }
 }
 
 /// Timeout for jk/kj escape sequence detection (milliseconds)
@@ -502,7 +498,10 @@ impl App {
         if items.is_empty() {
             return;
         }
-        let first = items.iter().position(|item| item.is_selectable()).unwrap_or(0);
+        let first = items
+            .iter()
+            .position(|item| item.is_selectable())
+            .unwrap_or(0);
         self.sidebar_state.list_state.select(Some(first));
         self.update_selected_conversation();
     }
@@ -513,7 +512,10 @@ impl App {
         if items.is_empty() {
             return;
         }
-        let last = items.iter().rposition(|item| item.is_selectable()).unwrap_or(items.len() - 1);
+        let last = items
+            .iter()
+            .rposition(|item| item.is_selectable())
+            .unwrap_or(items.len() - 1);
         self.sidebar_state.list_state.select(Some(last));
         self.update_selected_conversation();
     }
@@ -1218,7 +1220,10 @@ impl App {
             .or(self.active_session_id.as_ref());
 
         // Clear selection if the displayed session changed
-        let old_session_id = self.session_state_cache.as_ref().map(|s| s.session_id.clone());
+        let old_session_id = self
+            .session_state_cache
+            .as_ref()
+            .map(|s| s.session_id.clone());
         let new_session_id = display_session.cloned();
         if old_session_id != new_session_id {
             self.text_selection = None;
@@ -1557,9 +1562,7 @@ impl App {
     pub fn check_leader_timeout(&mut self) {
         if let InputMode::Leader(ref state) = self.input_mode {
             // Only auto-timeout at root level (before entering any submenu)
-            if state.path.is_empty()
-                && state.is_expired(self.which_key_config.timeout_ms)
-            {
+            if state.path.is_empty() && state.is_expired(self.which_key_config.timeout_ms) {
                 self.input_mode = InputMode::Normal;
                 return;
             }
@@ -2197,7 +2200,7 @@ impl App {
     /// Bookmark the currently selected item to the given slot
     /// Returns true if successful
     pub fn bookmark_current(&mut self, slot: u8) -> Result<bool> {
-        if slot < 1 || slot > 9 {
+        if !(1..=9).contains(&slot) {
             self.toast_error("Bookmark slot must be 1-9");
             return Ok(false);
         }
@@ -2247,7 +2250,7 @@ impl App {
     /// Create a bookmark for a group
     fn create_group_bookmark(&self, slot: u8, group_key: &str) -> Option<Bookmark> {
         for group in &self.groups {
-            if &group.key() == group_key {
+            if group.key() == group_key {
                 let project_path = group.project_path()?;
                 let name = group.display_name();
 
@@ -2270,7 +2273,7 @@ impl App {
         index: usize,
     ) -> Option<Bookmark> {
         for group in &self.groups {
-            if &group.key() == group_key {
+            if group.key() == group_key {
                 if let Some(conv) = group.conversations().get(index) {
                     let name = conv
                         .summary
@@ -2296,7 +2299,7 @@ impl App {
     /// Remove a bookmark from the given slot
     /// Returns true if a bookmark was removed
     pub fn remove_bookmark(&mut self, slot: u8) -> Result<bool> {
-        if slot < 1 || slot > 9 {
+        if !(1..=9).contains(&slot) {
             self.toast_error("Bookmark slot must be 1-9");
             return Ok(false);
         }
@@ -2327,11 +2330,8 @@ impl App {
                 for group in &self.groups {
                     if &group.key() == group_key {
                         if let Some(conv) = group.conversations().get(*index) {
-                            conv_info = Some((
-                                conv.session_id.clone(),
-                                conv.status,
-                                conv.is_archived,
-                            ));
+                            conv_info =
+                                Some((conv.session_id.clone(), conv.status, conv.is_archived));
                             break;
                         }
                     }
@@ -2603,7 +2603,7 @@ pub fn extract_selected_text(screen: &ScreenState, selection: &TextSelection) ->
     }
 
     // Remove trailing empty lines
-    while lines.last().map_or(false, |l| l.is_empty()) {
+    while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
 

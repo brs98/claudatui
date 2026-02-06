@@ -66,7 +66,13 @@ impl<'a> Widget for TerminalPane<'a> {
 
         match self.session_state {
             Some(state) => {
-                render_screen_state(&state.screen, inner_area, buf, state.scroll_offset, self.selection);
+                render_screen_state(
+                    &state.screen,
+                    inner_area,
+                    buf,
+                    state.scroll_offset,
+                    self.selection,
+                );
             }
             None => {
                 // Show placeholder when no PTY is active
@@ -103,7 +109,7 @@ fn render_screen_state(
             }
             let x = area.x + col_idx as u16;
 
-            let is_selected = selection.map_or(false, |sel| sel.contains(row_idx, col_idx));
+            let is_selected = selection.is_some_and(|sel| sel.contains(row_idx, col_idx));
 
             if !cell.contents.is_empty() {
                 let mut style = convert_cell_style(&cell.fg, &cell.bg, &cell.attrs);

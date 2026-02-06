@@ -92,12 +92,16 @@ impl SearchModalState {
                 self.list_state.select(Some(self.selected));
                 SearchKeyResult::Continue
             }
-            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) && !self.results.is_empty() => {
+            KeyCode::Char('j')
+                if key.modifiers.contains(KeyModifiers::CONTROL) && !self.results.is_empty() =>
+            {
                 self.selected = (self.selected + 1).min(self.results.len().saturating_sub(1));
                 self.list_state.select(Some(self.selected));
                 SearchKeyResult::Continue
             }
-            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) && !self.results.is_empty() => {
+            KeyCode::Char('k')
+                if key.modifiers.contains(KeyModifiers::CONTROL) && !self.results.is_empty() =>
+            {
                 self.selected = self.selected.saturating_sub(1);
                 self.list_state.select(Some(self.selected));
                 SearchKeyResult::Continue
