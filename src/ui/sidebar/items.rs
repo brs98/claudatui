@@ -43,9 +43,10 @@ pub fn build_sidebar_items(
 
     for group in visible_groups {
         // Check if a non-plan-impl conversation in this group has a running PTY (parent)
-        let group_has_running_parent = group.conversations().iter().any(|c| {
-            !c.is_plan_implementation && ctx.running_sessions.contains(&c.session_id)
-        });
+        let group_has_running_parent = group
+            .conversations()
+            .iter()
+            .any(|c| !c.is_plan_implementation && ctx.running_sessions.contains(&c.session_id));
 
         // Skip groups with no active content when hide_inactive is enabled
         if ctx.hide_inactive
@@ -202,9 +203,10 @@ pub fn group_has_active_content(
         }
     }
 
-    let group_has_running_parent = group.conversations().iter().any(|c| {
-        !c.is_plan_implementation && running_sessions.contains(&c.session_id)
-    });
+    let group_has_running_parent = group
+        .conversations()
+        .iter()
+        .any(|c| !c.is_plan_implementation && running_sessions.contains(&c.session_id));
 
     // Check for active/running conversations (excluding orchestrated plan implementations)
     for conv in group.conversations() {

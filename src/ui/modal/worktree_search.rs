@@ -241,9 +241,8 @@ impl WorktreeSearchModalState {
                     return WorktreeSearchKeyResult::Continue;
                 }
                 if branch.contains(' ') || branch.contains("..") || branch.starts_with('-') {
-                    self.error_message = Some(
-                        "Invalid branch name (no spaces, '..', or leading '-')".to_string(),
-                    );
+                    self.error_message =
+                        Some("Invalid branch name (no spaces, '..', or leading '-')".to_string());
                     return WorktreeSearchKeyResult::Continue;
                 }
                 if let Some(ref project) = self.selected_project {
@@ -490,7 +489,10 @@ fn render_project_list(state: &mut WorktreeSearchModalState, area: Rect, buf: &m
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  {}", path_str), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  {}", path_str),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]))
         })
         .collect();

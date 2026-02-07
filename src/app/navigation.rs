@@ -122,9 +122,9 @@ impl App {
         let conversations = group.conversations();
 
         // Plan impls are only hidden when orchestrated by a running parent
-        let group_has_running_parent = conversations.iter().any(|c| {
-            !c.is_plan_implementation && running.contains(&c.session_id)
-        });
+        let group_has_running_parent = conversations
+            .iter()
+            .any(|c| !c.is_plan_implementation && running.contains(&c.session_id));
 
         // First pass: find running conversations (excluding orchestrated plan implementations)
         for (conv_idx, conv) in conversations.iter().enumerate() {

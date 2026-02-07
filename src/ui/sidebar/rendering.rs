@@ -224,9 +224,10 @@ fn build_list_items(
 
     for group in visible_groups {
         // Check if a non-plan-impl conversation in this group has a running PTY (parent)
-        let group_has_running_parent = group.conversations().iter().any(|c| {
-            !c.is_plan_implementation && ctx.running_sessions.contains(&c.session_id)
-        });
+        let group_has_running_parent = group
+            .conversations()
+            .iter()
+            .any(|c| !c.is_plan_implementation && ctx.running_sessions.contains(&c.session_id));
 
         // Skip groups with no active content when hide_inactive is enabled
         if ctx.hide_inactive

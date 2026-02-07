@@ -352,9 +352,14 @@ impl App {
                 Conversation {
                     session_id: session.session_id,
                     display: session.summary.clone().unwrap_or_else(|| {
-                        let stripped = session.first_prompt
+                        let stripped = session
+                            .first_prompt
                             .strip_prefix("Implement the following plan:\n")
-                            .or_else(|| session.first_prompt.strip_prefix("Implement the following plan:"))
+                            .or_else(|| {
+                                session
+                                    .first_prompt
+                                    .strip_prefix("Implement the following plan:")
+                            })
                             .unwrap_or(&session.first_prompt)
                             .trim();
                         stripped.strip_prefix("# ").unwrap_or(stripped).to_string()

@@ -513,9 +513,7 @@ impl App {
             // processing yet — override Active → WaitingForInput.
             if status == ConversationStatus::Active {
                 if let Some(&baseline_size) = self.resume_jsonl_sizes.get(session_id) {
-                    let current_size = std::fs::metadata(&conv_path)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
+                    let current_size = std::fs::metadata(&conv_path).map(|m| m.len()).unwrap_or(0);
                     if current_size <= baseline_size {
                         // File hasn't grown — Claude hasn't started yet
                         status = ConversationStatus::WaitingForInput;
@@ -540,7 +538,11 @@ impl App {
     /// Record the current JSONL file size for a session being resumed.
     /// This lets us detect stale Active status when `detect_status_fast` reads
     /// old data before Claude has started processing the resumed session.
-    pub(crate) fn record_resume_jsonl_size(&mut self, claude_session_id: &str, project_path: &std::path::Path) {
+    pub(crate) fn record_resume_jsonl_size(
+        &mut self,
+        claude_session_id: &str,
+        project_path: &std::path::Path,
+    ) {
         let escaped = project_path.to_string_lossy().replace('/', "-");
         let jsonl_path = self
             .claude_dir

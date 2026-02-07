@@ -67,8 +67,7 @@ impl super::SidebarState {
                 FilterKeyResult::Continue
             }
             KeyCode::Right => {
-                self.filter_cursor_pos =
-                    (self.filter_cursor_pos + 1).min(self.filter_query.len());
+                self.filter_cursor_pos = (self.filter_cursor_pos + 1).min(self.filter_query.len());
                 FilterKeyResult::Continue
             }
             KeyCode::Home => {
