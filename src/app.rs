@@ -330,6 +330,8 @@ pub struct App {
     pub text_selection: Option<TextSelection>,
     /// Cached inner area of terminal pane (set during render, used for mouse coordinate mapping)
     pub terminal_inner_area: Option<Rect>,
+    /// Last time we polled JSONL status for running sessions
+    last_live_status_poll: Option<Instant>,
 }
 
 impl App {
@@ -392,6 +394,7 @@ impl App {
             escape_seq_state: EscapeSequenceState::None,
             text_selection: None,
             terminal_inner_area: None,
+            last_live_status_poll: None,
         };
 
         app.load_conversations_full()?;
@@ -424,25 +427,16 @@ impl App {
 
     /// Convert SessionEntry list to Conversation list
     fn sessions_to_conversations(&self, sessions: Vec<SessionEntry>) -> Vec<Conversation> {
-        let running = self.running_session_ids();
-
         sessions
             .into_iter()
             .map(|session| {
                 // Check conversation file for status using the full path
                 let conv_path = PathBuf::from(&session.full_path);
-                let mut status = if conv_path.exists() {
+                let status = if conv_path.exists() {
                     detect_status_fast(&conv_path).unwrap_or(ConversationStatus::Idle)
                 } else {
                     ConversationStatus::Idle
                 };
-
-                // Only show WaitingForInput if session is actually running
-                if status == ConversationStatus::WaitingForInput
-                    && !running.contains(&session.session_id)
-                {
-                    status = ConversationStatus::Idle;
-                }
 
                 // Detect plan implementation conversations by checking first_prompt
                 let is_plan_implementation = session
@@ -611,9 +605,9 @@ impl App {
         // Priority 2 & 3: Check conversations (running first, then active status)
         let conversations = group.conversations();
 
-        // First pass: find running conversations (excluding plan implementations)
+        // First pass: find running conversations (excluding running plan implementations)
         for (conv_idx, conv) in conversations.iter().enumerate() {
-            if conv.is_plan_implementation {
+            if conv.is_plan_implementation && running.contains(&conv.session_id) {
                 continue;
             }
             if running.contains(&conv.session_id) {
@@ -633,7 +627,7 @@ impl App {
 
         // Second pass: find conversations with Active or WaitingForInput status
         for (conv_idx, conv) in conversations.iter().enumerate() {
-            if conv.is_plan_implementation {
+            if conv.is_plan_implementation && running.contains(&conv.session_id) {
                 continue;
             }
             if matches!(
@@ -1478,6 +1472,33 @@ impl App {
                     conv.status = status;
                 }
             }
+        }
+    }
+
+    /// Poll JSONL status for all running sessions (throttled to ~1s intervals).
+    ///
+    /// For each session with a known Claude ID, re-reads the tail of the JSONL
+    /// transcript to detect whether Claude is actively working or waiting for input.
+    /// Ephemeral sessions (no Claude ID yet) are skipped — they default to Active.
+    pub fn poll_running_session_statuses(&mut self) {
+        const POLL_INTERVAL_MS: u128 = 1000;
+
+        if let Some(last) = self.last_live_status_poll {
+            if last.elapsed().as_millis() < POLL_INTERVAL_MS {
+                return;
+            }
+        }
+        self.last_live_status_poll = Some(Instant::now());
+
+        // Collect Claude IDs for running sessions to avoid borrow conflict
+        let claude_ids: Vec<String> = self
+            .session_to_claude_id
+            .values()
+            .filter_map(Clone::clone)
+            .collect();
+
+        for claude_id in claude_ids {
+            self.refresh_session_status(&claude_id);
         }
     }
 

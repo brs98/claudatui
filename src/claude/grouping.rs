@@ -416,7 +416,9 @@ mod tests {
     }
 
     #[test]
-    fn plan_implementation_conversations_are_filterable_from_group() {
+    fn plan_implementation_conversations_are_conditionally_hidden() {
+        use std::collections::HashSet;
+
         // Create a mix of regular and plan implementation conversations
         let mut regular = make_conversation("/Users/brandon/personal/project-a", 100);
         regular.display = "Regular conversation".to_string();
@@ -435,12 +437,23 @@ mod tests {
         let conversations = groups[0].conversations();
         assert_eq!(conversations.len(), 3); // All 3 are in the group
 
-        // But when we filter (simulating sidebar behavior):
-        let filtered: Vec<_> = conversations
+        // When plan implementation's PTY is running, it should be hidden
+        let mut running_sessions = HashSet::new();
+        running_sessions.insert("session-200".to_string());
+
+        let filtered_while_running: Vec<_> = conversations
             .iter()
-            .filter(|c| !c.is_plan_implementation)
+            .filter(|c| !(c.is_plan_implementation && running_sessions.contains(&c.session_id)))
             .collect();
-        assert_eq!(filtered.len(), 2); // Only 2 visible
-        assert!(!filtered.iter().any(|c| c.is_plan_implementation));
+        assert_eq!(filtered_while_running.len(), 2); // Plan impl hidden
+
+        // When PTY is not running (dead or app restarted), plan impl should be visible
+        let no_running: HashSet<String> = HashSet::new();
+
+        let filtered_after_death: Vec<_> = conversations
+            .iter()
+            .filter(|c| !(c.is_plan_implementation && no_running.contains(&c.session_id)))
+            .collect();
+        assert_eq!(filtered_after_death.len(), 3); // All visible, including plan impl
     }
 }

@@ -46,25 +46,21 @@ pub struct Conversation {
     pub archived_at: Option<DateTime<Utc>>,
 }
 
-/// Message from a conversation JSONL file
+/// Entry from a conversation JSONL file (top-level structure)
 #[derive(Debug, Deserialize)]
-struct ConversationMessage {
+struct JournalEntry {
+    /// Entry type: "assistant", "user", "system", "summary", "progress"
     #[serde(rename = "type")]
-    #[expect(dead_code, reason = "deserialized from JSON")]
-    msg_type: String,
-    message: Option<MessageContent>,
+    entry_type: String,
+    /// Subtype for system entries (e.g., "turn_duration")
+    subtype: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct MessageContent {
-    role: Option<String>,
-    #[expect(dead_code, reason = "deserialized from JSON")]
-    content: Option<serde_json::Value>,
-    #[serde(rename = "stop_reason")]
-    stop_reason: Option<String>,
-}
-
-/// Parse only the last few lines of a conversation to detect status efficiently
+/// Parse only the last few lines of a conversation to detect status efficiently.
+///
+/// Uses the entry-level `type` field (not `message.stop_reason`, which is always None
+/// in modern transcripts). Skips `progress` entries (tool output noise) to find the
+/// last meaningful entry.
 pub fn detect_status_fast(path: &Path) -> Result<ConversationStatus> {
     if !path.exists() {
         return Ok(ConversationStatus::Idle);
@@ -73,13 +69,13 @@ pub fn detect_status_fast(path: &Path) -> Result<ConversationStatus> {
     let mut file = File::open(path)?;
     let file_size = file.metadata()?.len();
 
-    // Read the last 8KB to find the last message
+    // Read the last 8KB to find the last meaningful entry
     let read_from = file_size.saturating_sub(8192);
     file.seek(SeekFrom::Start(read_from))?;
 
     let reader = BufReader::new(file);
-    let mut last_message_role: Option<String> = None;
-    let mut last_stop_reason: Option<String> = None;
+    let mut last_entry_type: Option<String> = None;
+    let mut last_subtype: Option<String> = None;
 
     for line in reader.lines() {
         let line = match line {
@@ -91,35 +87,160 @@ pub fn detect_status_fast(path: &Path) -> Result<ConversationStatus> {
             continue;
         }
 
-        let msg: ConversationMessage = match serde_json::from_str(&line) {
-            Ok(m) => m,
+        let entry: JournalEntry = match serde_json::from_str(&line) {
+            Ok(e) => e,
             Err(_) => continue,
         };
 
-        if let Some(ref content) = msg.message {
-            if let Some(ref role) = content.role {
-                last_message_role = Some(role.clone());
-                last_stop_reason = content.stop_reason.clone();
-            }
+        // Skip noise entries that don't indicate conversation state
+        if matches!(
+            entry.entry_type.as_str(),
+            "progress" | "file-history-snapshot" | "pr-link"
+        ) {
+            continue;
+        }
+
+        last_subtype = entry.subtype;
+        last_entry_type = Some(entry.entry_type);
+    }
+
+    Ok(match last_entry_type.as_deref() {
+        // Turn completed: Claude finished and is waiting for user input
+        Some("summary") => ConversationStatus::WaitingForInput,
+        Some("system") if last_subtype.as_deref() == Some("turn_duration") => {
+            ConversationStatus::WaitingForInput
+        }
+        // User just sent a message — Claude should be processing
+        Some("user") => ConversationStatus::Active,
+        // Claude wrote a response — ball is with the user (or a tool is executing)
+        Some("assistant") => ConversationStatus::WaitingForInput,
+        _ => ConversationStatus::Idle,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_jsonl(path: &Path, lines: &[&str]) {
+        let mut f = File::create(path).unwrap();
+        for line in lines {
+            writeln!(f, "{}", line).unwrap();
         }
     }
 
-    Ok(detect_status(&last_message_role, &last_stop_reason))
-}
+    #[test]
+    fn summary_entry_returns_waiting_for_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"system","subtype":"turn_duration"}"#,
+            r#"{"type":"summary"}"#,
+        ]);
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
 
-fn detect_status(last_role: &Option<String>, stop_reason: &Option<String>) -> ConversationStatus {
-    match last_role.as_deref() {
-        Some("assistant") => {
-            if stop_reason.as_deref() == Some("end_turn") {
-                ConversationStatus::WaitingForInput
-            } else {
-                // stop_reason is null - could be streaming or interrupted
-                // Default to Idle since we can't detect if Claude is actually running
-                ConversationStatus::Idle
-            }
-        }
-        // User sent a message but no assistant response yet - waiting for Claude
-        Some("user") => ConversationStatus::WaitingForInput,
-        _ => ConversationStatus::Idle,
+    #[test]
+    fn turn_duration_entry_returns_waiting_for_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"system","subtype":"turn_duration"}"#,
+        ]);
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn user_entry_returns_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"system","subtype":"turn_duration"}"#,
+            r#"{"type":"user"}"#,
+        ]);
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::Active);
+    }
+
+    #[test]
+    fn assistant_entry_returns_waiting_for_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+        ]);
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn progress_entries_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"progress","data":{"tool":"bash"}}"#,
+            r#"{"type":"progress","data":{"tool":"bash"}}"#,
+        ]);
+        // Last non-progress entry is "assistant" → WaitingForInput
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn empty_file_returns_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        std::fs::write(&p, "").unwrap();
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::Idle);
+    }
+
+    #[test]
+    fn nonexistent_file_returns_idle() {
+        let p = Path::new("/tmp/claudatui_nonexistent_test.jsonl");
+        assert_eq!(detect_status_fast(p).unwrap(), ConversationStatus::Idle);
+    }
+
+    #[test]
+    fn malformed_lines_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            "this is not json",
+            r#"{"type":"summary"}"#,
+        ]);
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn metadata_entries_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"system","subtype":"turn_duration"}"#,
+            r#"{"type":"file-history-snapshot"}"#,
+            r#"{"type":"pr-link"}"#,
+        ]);
+        // file-history-snapshot and pr-link are skipped → turn_duration is last → WaitingForInput
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn only_metadata_entries_returns_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"file-history-snapshot"}"#,
+        ]);
+        // Brand new session with only a file snapshot → Idle
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::Idle);
     }
 }

@@ -429,7 +429,7 @@ fn build_list_items(
 
         // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {
-            !conv.is_plan_implementation
+            !is_hidden_plan_implementation(conv, ctx.running_sessions)
                 && should_show_conversation(
                     conv,
                     ctx.archive_filter,
@@ -484,7 +484,7 @@ fn build_list_items(
                         items.push(ListItem::new(Line::from(vec![
                             Span::styled(line_num, Style::default().fg(Color::DarkGray)),
                             Span::raw("  "),
-                            Span::styled("● ", Style::default().fg(Color::Green)),
+                            Span::styled("◐ ", Style::default().fg(Color::Yellow)),
                             Span::styled(
                                 format!(
                                     "New conversation ({})",
@@ -498,12 +498,12 @@ fn build_list_items(
                 }
             }
 
-            // Get all conversations and filter out plan implementations
+            // Get all conversations and filter out running plan implementations
             // Also filter by archive status, inactive, and text filter
             let conversations = group.conversations();
             let filtered_convos: Vec<_> = conversations
                 .iter()
-                .filter(|conv| !conv.is_plan_implementation)
+                .filter(|conv| !is_hidden_plan_implementation(conv, ctx.running_sessions))
                 .filter(|conv| {
                     should_show_conversation(
                         conv,
@@ -538,19 +538,20 @@ fn build_list_items(
                 // regardless of the file-based status
                 let is_running = ctx.running_sessions.contains(&conv.session_id);
                 let (status_indicator, archive_indicator) = if is_running {
-                    (Span::styled("● ", Style::default().fg(Color::Green)), None)
-                } else {
-                    let status = match conv.status {
-                        ConversationStatus::Active => {
+                    // Use live-polled conv.status for running sessions
+                    let indicator = match conv.status {
+                        ConversationStatus::Active | ConversationStatus::Idle => {
+                            // Active or Idle-fallback for running sessions → green
                             Span::styled("● ", Style::default().fg(Color::Green))
                         }
                         ConversationStatus::WaitingForInput => {
                             Span::styled("◐ ", Style::default().fg(Color::Yellow))
                         }
-                        ConversationStatus::Idle => {
-                            Span::styled("○ ", Style::default().fg(Color::DarkGray))
-                        }
                     };
+                    (indicator, None)
+                } else {
+                    // Not running — always show as idle regardless of JSONL state
+                    let status = Span::styled("○ ", Style::default().fg(Color::DarkGray));
                     // Show archive indicator when in "All" view
                     let archive = if ctx.archive_filter == ArchiveFilter::All && conv.is_archived {
                         Some(Span::styled("📦 ", Style::default().fg(Color::DarkGray)))
@@ -573,6 +574,12 @@ fn build_list_items(
                 }
 
                 line_parts.push(status_indicator);
+
+                // Show plan implementation indicator for orphaned plan sessions
+                if conv.is_plan_implementation {
+                    line_parts.push(Span::styled("[plan] ", Style::default().fg(Color::Magenta)));
+                }
+
                 line_parts.push(Span::raw(display));
 
                 items.push(ListItem::new(Line::from(line_parts)));
@@ -657,6 +664,17 @@ fn conv_matches_filter(
             .is_some_and(|s| s.to_lowercase().contains(filter_lower))
 }
 
+/// Check if a plan implementation conversation should be hidden.
+///
+/// Plan implementations are only hidden while their PTY session is still running.
+/// Once the PTY dies or the app restarts, they appear normally in the sidebar.
+fn is_hidden_plan_implementation(
+    conv: &crate::claude::conversation::Conversation,
+    running_sessions: &HashSet<String>,
+) -> bool {
+    conv.is_plan_implementation && running_sessions.contains(&conv.session_id)
+}
+
 /// Check if a conversation should be shown based on archive filter and other criteria
 fn should_show_conversation(
     conv: &crate::claude::conversation::Conversation,
@@ -703,9 +721,9 @@ pub fn group_has_active_content(
         }
     }
 
-    // Check for active/running conversations (excluding plan implementations)
+    // Check for active/running conversations (excluding running plan implementations)
     for conv in group.conversations() {
-        if conv.is_plan_implementation {
+        if conv.is_plan_implementation && running_sessions.contains(&conv.session_id) {
             continue;
         }
         let is_running = running_sessions.contains(&conv.session_id);
@@ -821,7 +839,7 @@ pub fn build_sidebar_items(
 
         // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {
-            !conv.is_plan_implementation
+            !is_hidden_plan_implementation(conv, ctx.running_sessions)
                 && should_show_conversation(
                     conv,
                     ctx.archive_filter,
@@ -863,14 +881,14 @@ pub fn build_sidebar_items(
                 }
             }
 
-            // Get all conversations and filter out plan implementations
+            // Get all conversations and filter out running plan implementations
             // Also filter by archive status, inactive, and text filter
             // We keep track of original indices so lookup in app.rs still works
             let conversations = group.conversations();
             let filtered_indices: Vec<usize> = conversations
                 .iter()
                 .enumerate()
-                .filter(|(_, conv)| !conv.is_plan_implementation)
+                .filter(|(_, conv)| !is_hidden_plan_implementation(conv, ctx.running_sessions))
                 .filter(|(_, conv)| {
                     should_show_conversation(
                         conv,
