@@ -416,6 +416,11 @@ fn build_list_items(
     };
 
     for group in visible_groups {
+        // Check if a non-plan-impl conversation in this group has a running PTY (parent)
+        let group_has_running_parent = group.conversations().iter().any(|c| {
+            !c.is_plan_implementation && ctx.running_sessions.contains(&c.session_id)
+        });
+
         // Skip groups with no active content when hide_inactive is enabled
         if ctx.hide_inactive
             && !group_has_active_content(group, ctx.running_sessions, ctx.ephemeral_sessions)
@@ -429,7 +434,7 @@ fn build_list_items(
 
         // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {
-            !is_hidden_plan_implementation(conv, ctx.running_sessions)
+            !is_hidden_plan_implementation(conv, ctx.running_sessions, group_has_running_parent)
                 && should_show_conversation(
                     conv,
                     ctx.archive_filter,
@@ -498,12 +503,12 @@ fn build_list_items(
                 }
             }
 
-            // Get all conversations and filter out running plan implementations
+            // Get all conversations, hiding plan impls only when parent is orchestrating
             // Also filter by archive status, inactive, and text filter
             let conversations = group.conversations();
             let filtered_convos: Vec<_> = conversations
                 .iter()
-                .filter(|conv| !is_hidden_plan_implementation(conv, ctx.running_sessions))
+                .filter(|conv| !is_hidden_plan_implementation(conv, ctx.running_sessions, group_has_running_parent))
                 .filter(|conv| {
                     should_show_conversation(
                         conv,
@@ -540,11 +545,10 @@ fn build_list_items(
                 let (status_indicator, archive_indicator) = if is_running {
                     // Use live-polled conv.status for running sessions
                     let indicator = match conv.status {
-                        ConversationStatus::Active | ConversationStatus::Idle => {
-                            // Active or Idle-fallback for running sessions → green
+                        ConversationStatus::Active => {
                             Span::styled("● ", Style::default().fg(Color::Green))
                         }
-                        ConversationStatus::WaitingForInput => {
+                        ConversationStatus::WaitingForInput | ConversationStatus::Idle => {
                             Span::styled("◐ ", Style::default().fg(Color::Yellow))
                         }
                     };
@@ -574,12 +578,6 @@ fn build_list_items(
                 }
 
                 line_parts.push(status_indicator);
-
-                // Show plan implementation indicator for orphaned plan sessions
-                if conv.is_plan_implementation {
-                    line_parts.push(Span::styled("[plan] ", Style::default().fg(Color::Magenta)));
-                }
-
                 line_parts.push(Span::raw(display));
 
                 items.push(ListItem::new(Line::from(line_parts)));
@@ -666,13 +664,19 @@ fn conv_matches_filter(
 
 /// Check if a plan implementation conversation should be hidden.
 ///
-/// Plan implementations are only hidden while their PTY session is still running.
-/// Once the PTY dies or the app restarts, they appear normally in the sidebar.
+/// Plan implementations are hidden only when a parent session is orchestrating them.
+/// During orchestration, the plan impl runs inside the parent's PTY (no PTY of its own)
+/// while the parent (a non-plan conversation in the same group) has a running PTY.
+/// Once the parent dies or the user directly activates the plan impl (giving it its own
+/// PTY), it becomes visible.
 fn is_hidden_plan_implementation(
     conv: &crate::claude::conversation::Conversation,
     running_sessions: &HashSet<String>,
+    group_has_running_parent: bool,
 ) -> bool {
-    conv.is_plan_implementation && running_sessions.contains(&conv.session_id)
+    conv.is_plan_implementation
+        && !running_sessions.contains(&conv.session_id)
+        && group_has_running_parent
 }
 
 /// Check if a conversation should be shown based on archive filter and other criteria
@@ -721,9 +725,13 @@ pub fn group_has_active_content(
         }
     }
 
-    // Check for active/running conversations (excluding running plan implementations)
+    let group_has_running_parent = group.conversations().iter().any(|c| {
+        !c.is_plan_implementation && running_sessions.contains(&c.session_id)
+    });
+
+    // Check for active/running conversations (excluding orchestrated plan implementations)
     for conv in group.conversations() {
-        if conv.is_plan_implementation && running_sessions.contains(&conv.session_id) {
+        if is_hidden_plan_implementation(conv, running_sessions, group_has_running_parent) {
             continue;
         }
         let is_running = running_sessions.contains(&conv.session_id);
@@ -824,6 +832,11 @@ pub fn build_sidebar_items(
     };
 
     for group in visible_groups {
+        // Check if a non-plan-impl conversation in this group has a running PTY (parent)
+        let group_has_running_parent = group.conversations().iter().any(|c| {
+            !c.is_plan_implementation && ctx.running_sessions.contains(&c.session_id)
+        });
+
         // Skip groups with no active content when hide_inactive is enabled
         if ctx.hide_inactive
             && !group_has_active_content(group, ctx.running_sessions, ctx.ephemeral_sessions)
@@ -839,7 +852,7 @@ pub fn build_sidebar_items(
 
         // Check if group has any conversations visible with current archive + text filter
         let has_visible_conversations = group.conversations().iter().any(|conv| {
-            !is_hidden_plan_implementation(conv, ctx.running_sessions)
+            !is_hidden_plan_implementation(conv, ctx.running_sessions, group_has_running_parent)
                 && should_show_conversation(
                     conv,
                     ctx.archive_filter,
@@ -881,14 +894,14 @@ pub fn build_sidebar_items(
                 }
             }
 
-            // Get all conversations and filter out running plan implementations
+            // Get all conversations, hiding plan impls only when parent is orchestrating
             // Also filter by archive status, inactive, and text filter
             // We keep track of original indices so lookup in app.rs still works
             let conversations = group.conversations();
             let filtered_indices: Vec<usize> = conversations
                 .iter()
                 .enumerate()
-                .filter(|(_, conv)| !is_hidden_plan_implementation(conv, ctx.running_sessions))
+                .filter(|(_, conv)| !is_hidden_plan_implementation(conv, ctx.running_sessions, group_has_running_parent))
                 .filter(|(_, conv)| {
                     should_show_conversation(
                         conv,

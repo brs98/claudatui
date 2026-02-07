@@ -437,23 +437,40 @@ mod tests {
         let conversations = groups[0].conversations();
         assert_eq!(conversations.len(), 3); // All 3 are in the group
 
-        // When plan implementation's PTY is running, it should be hidden
-        let mut running_sessions = HashSet::new();
-        running_sessions.insert("session-200".to_string());
+        // Helper: mirrors is_hidden_plan_implementation logic
+        let is_hidden = |c: &&Conversation, running: &HashSet<String>, has_parent: bool| -> bool {
+            c.is_plan_implementation && !running.contains(&c.session_id) && has_parent
+        };
 
-        let filtered_while_running: Vec<_> = conversations
+        // Case 1: Parent session is running (orchestrating) — plan impl hidden
+        let mut running = HashSet::new();
+        running.insert("session-100".to_string()); // parent is running
+        let has_parent = true;
+
+        let filtered: Vec<_> = conversations
             .iter()
-            .filter(|c| !(c.is_plan_implementation && running_sessions.contains(&c.session_id)))
+            .filter(|c| !is_hidden(c, &running, has_parent))
             .collect();
-        assert_eq!(filtered_while_running.len(), 2); // Plan impl hidden
+        assert_eq!(filtered.len(), 2); // Plan impl hidden (orchestrated by parent)
 
-        // When PTY is not running (dead or app restarted), plan impl should be visible
+        // Case 2: No parent running (orphaned) — plan impl visible
         let no_running: HashSet<String> = HashSet::new();
 
-        let filtered_after_death: Vec<_> = conversations
+        let filtered: Vec<_> = conversations
             .iter()
-            .filter(|c| !(c.is_plan_implementation && no_running.contains(&c.session_id)))
+            .filter(|c| !is_hidden(c, &no_running, false))
             .collect();
-        assert_eq!(filtered_after_death.len(), 3); // All visible, including plan impl
+        assert_eq!(filtered.len(), 3); // All visible
+
+        // Case 3: User directly activated plan impl (it has its own PTY) — visible
+        let mut running = HashSet::new();
+        running.insert("session-200".to_string()); // plan impl running directly
+        let has_parent = false; // no non-plan session running
+
+        let filtered: Vec<_> = conversations
+            .iter()
+            .filter(|c| !is_hidden(c, &running, has_parent))
+            .collect();
+        assert_eq!(filtered.len(), 3); // All visible (plan impl has its own PTY)
     }
 }
