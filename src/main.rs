@@ -205,17 +205,8 @@ fn handle_key_event(
     }
 
     // 0.5. True global keybindings — must work even in Insert mode
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(KeyAction::Quit),
-        (KeyCode::Left | KeyCode::Char('h'), KeyModifiers::CONTROL) => {
-            app.exit_insert_mode();
-            return Ok(KeyAction::Continue);
-        }
-        (KeyCode::Right | KeyCode::Char('l'), KeyModifiers::CONTROL) => {
-            app.enter_insert_mode();
-            return Ok(KeyAction::Continue);
-        }
-        _ => {}
+    if let (KeyCode::Char('q'), KeyModifiers::CONTROL) = (key.code, key.modifiers) {
+        return Ok(KeyAction::Quit);
     }
 
     // 1. Insert mode - handle filter, modal, or terminal passthrough with jk/kj escape detection
