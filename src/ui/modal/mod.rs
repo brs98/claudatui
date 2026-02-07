@@ -1,5 +1,9 @@
 //! Modal dialog components for the TUI.
 
+use std::path::PathBuf;
+
+use crossterm::event::KeyEvent;
+
 pub mod new_project;
 pub mod search;
 pub mod worktree;
@@ -11,3 +15,31 @@ pub use worktree::{WorktreeModal, WorktreeModalState};
 pub use worktree_search::{
     WorktreeProject, WorktreeSearchKeyResult, WorktreeSearchModal, WorktreeSearchModalState,
 };
+
+/// Unified result type for modal key handling dispatch.
+pub enum ModalKeyResult {
+    /// Nothing happened, continue.
+    Continue,
+    /// Modal wants to close.
+    Close,
+    /// A path was selected (NewProject modal).
+    PathSelected(PathBuf),
+    /// A search result was selected (Search modal).
+    SearchSelected(String),
+    /// Search query changed (Search modal).
+    SearchQueryChanged,
+    /// A branch name was entered (Worktree modal).
+    BranchSelected(String),
+    /// Worktree search confirmed (WorktreeSearch modal).
+    WorktreeSearchConfirmed {
+        project_path: PathBuf,
+        branch_name: String,
+    },
+    /// Query changed in worktree search.
+    WorktreeSearchQueryChanged,
+}
+
+/// Trait for unified modal key dispatch.
+pub trait Modal {
+    fn handle_key_modal(&mut self, key: KeyEvent) -> ModalKeyResult;
+}

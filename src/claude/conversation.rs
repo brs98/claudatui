@@ -82,10 +82,7 @@ pub fn detect_status_fast(path: &Path) -> Result<ConversationStatus> {
     let mut last_subtype: Option<String> = None;
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        let Ok(line) = line else { continue };
 
         if line.trim().is_empty() {
             continue;

@@ -174,6 +174,18 @@ impl SearchModalState {
     }
 }
 
+impl super::Modal for SearchModalState {
+    fn handle_key_modal(&mut self, key: KeyEvent) -> super::ModalKeyResult {
+        match self.handle_key(key) {
+            SearchKeyResult::Continue => super::ModalKeyResult::Continue,
+            SearchKeyResult::QueryChanged => super::ModalKeyResult::SearchQueryChanged,
+            SearchKeyResult::Selected(session_id) => {
+                super::ModalKeyResult::SearchSelected(session_id)
+            }
+        }
+    }
+}
+
 /// Result of handling a key in the search modal
 pub enum SearchKeyResult {
     /// Continue with no action
@@ -248,7 +260,7 @@ impl Widget for SearchModal<'_> {
         self.render_results(chunks[2], buf);
 
         // Render help bar
-        self.render_help_bar(chunks[3], buf);
+        Self::render_help_bar(chunks[3], buf);
     }
 }
 
@@ -385,7 +397,7 @@ impl SearchModal<'_> {
         ratatui::widgets::StatefulWidget::render(list, area, buf, &mut self.state.list_state);
     }
 
-    fn render_help_bar(&self, area: Rect, buf: &mut Buffer) {
+    fn render_help_bar(area: Rect, buf: &mut Buffer) {
         let help_spans = vec![
             Span::styled(" Tab ", Style::default().fg(Color::Cyan)),
             Span::raw("filter "),

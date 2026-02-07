@@ -53,15 +53,15 @@ impl<'a> ToastWidget<'a> {
             frame.render_widget(Clear, toast_area);
 
             // Render toast
-            let border_style = self.get_border_style(toast.toast_type);
-            let bg_style = self.get_background_style(toast.toast_type);
+            let border_style = Self::get_border_style(toast.toast_type);
+            let bg_style = Self::get_background_style(toast.toast_type);
 
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(border_style)
                 .style(bg_style);
 
-            let icon = self.get_icon(toast.toast_type);
+            let icon = Self::get_icon(toast.toast_type);
             let text = Paragraph::new(Line::from(vec![
                 Span::styled(icon, border_style.add_modifier(Modifier::BOLD)),
                 Span::raw(" "),
@@ -115,7 +115,7 @@ impl<'a> ToastWidget<'a> {
         Rect::new(x, y, width.min(area.width), height.min(area.height))
     }
 
-    fn get_icon(&self, toast_type: ToastType) -> &'static str {
+    fn get_icon(toast_type: ToastType) -> &'static str {
         match toast_type {
             ToastType::Info => "ℹ",
             ToastType::Success => "✓",
@@ -124,7 +124,7 @@ impl<'a> ToastWidget<'a> {
         }
     }
 
-    fn get_border_style(&self, toast_type: ToastType) -> Style {
+    fn get_border_style(toast_type: ToastType) -> Style {
         let color = match toast_type {
             ToastType::Info => Color::Cyan,
             ToastType::Success => Color::Green,
@@ -134,7 +134,7 @@ impl<'a> ToastWidget<'a> {
         Style::default().fg(color)
     }
 
-    fn get_background_style(&self, toast_type: ToastType) -> Style {
+    fn get_background_style(toast_type: ToastType) -> Style {
         let color = match toast_type {
             ToastType::Info => Color::Black,
             ToastType::Success => Color::Black,

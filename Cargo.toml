@@ -39,6 +39,12 @@ cloned_instead_of_copied = "warn"
 flat_map_option = "warn"
 redundant_closure_for_method_calls = "warn"
 unnested_or_patterns = "warn"
+needless_pass_by_value = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+manual_let_else = "warn"
+semicolon_if_nothing_returned = "warn"
+unused_self = "warn"
 
 [profile.release]
 lto = "thin"

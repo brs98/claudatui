@@ -100,15 +100,13 @@ impl ArchiveManager {
 
     /// Check if a conversation should be auto-archived based on its timestamp
     pub fn should_auto_archive(&self, timestamp_ms: i64) -> bool {
-        let days = match self.state.auto_archive_days {
-            Some(d) => d,
-            None => return false, // Auto-archive disabled
+        let Some(days) = self.state.auto_archive_days else {
+            return false; // Auto-archive disabled
         };
 
         let now = Utc::now();
-        let conv_time = match DateTime::from_timestamp_millis(timestamp_ms) {
-            Some(t) => t,
-            None => return false,
+        let Some(conv_time) = DateTime::from_timestamp_millis(timestamp_ms) else {
+            return false;
         };
 
         let age = now.signed_duration_since(conv_time);

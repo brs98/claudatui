@@ -135,7 +135,7 @@ pub fn screen_state_from_vt100(parser: &vt100::Parser, _scroll_offset: usize) ->
                 continue;
             };
             cells.push(ScreenCell {
-                contents: cell.contents().to_string(),
+                contents: cell.contents().clone(),
                 fg: TermColor::from_vt100(cell.fgcolor()),
                 bg: TermColor::from_vt100(cell.bgcolor()),
                 attrs: CellAttrs::from_vt100_cell(cell),

@@ -5,7 +5,7 @@
 //! the user presses leader key sequences.
 
 /// Actions that can be triggered via the leader key menu
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LeaderAction {
     // Bookmark actions
     /// Jump to bookmark slot (1-9)
@@ -217,16 +217,15 @@ impl WhichKeyConfig {
     /// Returns Some(action) if an action should be executed,
     /// None if navigating to a submenu or invalid key
     pub fn process_key(&self, path: &[char], key: char) -> LeaderKeyResult {
-        let commands = match self.commands_at_path(path) {
-            Some(cmds) => cmds,
-            None => return LeaderKeyResult::Cancel,
+        let Some(commands) = self.commands_at_path(path) else {
+            return LeaderKeyResult::Cancel;
         };
 
         match commands.iter().find(|cmd| cmd.key == key) {
             Some(LeaderCommand {
                 action: Some(action),
                 ..
-            }) => LeaderKeyResult::Execute(action.clone()),
+            }) => LeaderKeyResult::Execute(*action),
             Some(cmd) if !cmd.subcommands.is_empty() => LeaderKeyResult::Submenu,
             _ => LeaderKeyResult::Cancel, // Invalid key
         }

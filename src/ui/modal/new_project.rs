@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+
     buffer::Buffer,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -85,7 +86,7 @@ impl NewProjectModalState {
             KeyCode::Enter => {
                 // Confirm selection
                 let current = self.file_explorer.current();
-                let path = current.path().to_path_buf();
+                let path = current.path().clone();
 
                 // If it's a file, use its parent directory
                 let dir_path = if path.is_file() {
@@ -222,7 +223,16 @@ impl NewProjectModalState {
 
     /// Get the current working directory being browsed
     pub fn current_browse_path(&self) -> PathBuf {
-        self.file_explorer.cwd().to_path_buf()
+        self.file_explorer.cwd().clone()
+    }
+}
+
+impl super::Modal for NewProjectModalState {
+    fn handle_key_modal(&mut self, key: KeyEvent) -> super::ModalKeyResult {
+        match self.handle_key(key) {
+            Some(path) => super::ModalKeyResult::PathSelected(path),
+            None => super::ModalKeyResult::Continue,
+        }
     }
 }
 

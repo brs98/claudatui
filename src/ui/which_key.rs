@@ -62,9 +62,8 @@ impl<'a> WhichKeyWidget<'a> {
 
     /// Build command display lines
     fn build_command_lines(&self) -> Vec<Line<'a>> {
-        let commands = match self.config.commands_at_path(self.path) {
-            Some(cmds) => cmds,
-            None => return vec![Line::from("No commands available")],
+        let Some(commands) = self.config.commands_at_path(self.path) else {
+            return vec![Line::from("No commands available")];
         };
 
         // Group commands into rows (4-5 commands per row for readability)

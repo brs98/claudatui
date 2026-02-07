@@ -302,6 +302,26 @@ impl WorktreeSearchModalState {
     }
 }
 
+impl super::Modal for WorktreeSearchModalState {
+    fn handle_key_modal(&mut self, key: KeyEvent) -> super::ModalKeyResult {
+        match self.handle_key(key) {
+            WorktreeSearchKeyResult::Continue => super::ModalKeyResult::Continue,
+            WorktreeSearchKeyResult::QueryChanged => {
+                self.refilter();
+                super::ModalKeyResult::WorktreeSearchQueryChanged
+            }
+            WorktreeSearchKeyResult::Confirmed {
+                project_path,
+                branch_name,
+            } => super::ModalKeyResult::WorktreeSearchConfirmed {
+                project_path,
+                branch_name,
+            },
+            WorktreeSearchKeyResult::Close => super::ModalKeyResult::Close,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Widget
 // ---------------------------------------------------------------------------
@@ -465,7 +485,7 @@ fn render_project_list(state: &mut WorktreeSearchModalState, area: Rect, buf: &m
             let path_str = project.project_path.to_string_lossy();
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    project.display_name.to_string(),
+                    project.display_name.clone(),
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),

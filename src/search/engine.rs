@@ -32,7 +32,7 @@ impl SearchEngine {
 
                 // Search in display text (which contains summary or first message)
                 if conv.display.to_lowercase().contains(&query_lower) {
-                    let snippet = self.create_snippet(&conv.display, &query_lower);
+                    let snippet = Self::create_snippet(&conv.display, &query_lower);
                     results.push(SearchResult::new(conv.clone(), snippet));
                     continue;
                 }
@@ -40,7 +40,7 @@ impl SearchEngine {
                 // Search in summary if available
                 if let Some(ref summary) = conv.summary {
                     if summary.to_lowercase().contains(&query_lower) {
-                        let snippet = self.create_snippet(summary, &query_lower);
+                        let snippet = Self::create_snippet(summary, &query_lower);
                         results.push(SearchResult::new(conv.clone(), snippet));
                     }
                 }
@@ -112,7 +112,7 @@ impl SearchEngine {
 
     /// Create a snippet with the query highlighted (indicated by context).
     /// Uses character indices to handle UTF-8 safely.
-    pub(crate) fn create_snippet(&self, text: &str, query: &str) -> String {
+    pub(crate) fn create_snippet(text: &str, query: &str) -> String {
         let text_lower = text.to_lowercase();
         let query_lower = query.to_lowercase();
 
@@ -266,34 +266,30 @@ mod tests {
 
     #[test]
     fn create_snippet_extracts_context_around_match() {
-        let engine = SearchEngine::new(PathBuf::from("/tmp"));
         let text = "This is a long text that contains the word authentication somewhere in the middle of it all";
-        let snippet = engine.create_snippet(text, "authentication");
+        let snippet = SearchEngine::create_snippet(text, "authentication");
         assert!(snippet.contains("authentication"));
     }
 
     #[test]
     fn create_snippet_handles_utf8_text() {
-        let engine = SearchEngine::new(PathBuf::from("/tmp"));
         let text = "Hllo wrld with mji and special chars";
-        let snippet = engine.create_snippet(text, "mji");
+        let snippet = SearchEngine::create_snippet(text, "mji");
         assert!(snippet.contains("mji"));
     }
 
     #[test]
     fn create_snippet_adds_ellipsis_for_long_text() {
-        let engine = SearchEngine::new(PathBuf::from("/tmp"));
         let text = "a".repeat(100) + "target" + &"b".repeat(100);
-        let snippet = engine.create_snippet(&text, "target");
+        let snippet = SearchEngine::create_snippet(&text, "target");
         assert!(snippet.contains("..."));
         assert!(snippet.contains("target"));
     }
 
     #[test]
     fn create_snippet_truncates_when_no_match_found() {
-        let engine = SearchEngine::new(PathBuf::from("/tmp"));
         let text = "a".repeat(100);
-        let snippet = engine.create_snippet(&text, "xyz");
+        let snippet = SearchEngine::create_snippet(&text, "xyz");
         assert!(snippet.ends_with("..."));
         // 60 chars + "..." = 63
         assert_eq!(snippet.len(), 63);
@@ -301,8 +297,7 @@ mod tests {
 
     #[test]
     fn create_snippet_returns_full_text_when_short_and_no_match() {
-        let engine = SearchEngine::new(PathBuf::from("/tmp"));
-        let snippet = engine.create_snippet("short text", "xyz");
+        let snippet = SearchEngine::create_snippet("short text", "xyz");
         assert_eq!(snippet, "short text");
     }
 

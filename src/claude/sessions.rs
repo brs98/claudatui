@@ -104,9 +104,8 @@ fn is_uuid(s: &str) -> bool {
 fn discover_session_files(project_dir: &Path) -> HashMap<String, SessionFile> {
     let mut sessions = HashMap::new();
 
-    let entries = match fs::read_dir(project_dir) {
-        Ok(e) => e,
-        Err(_) => return sessions,
+    let Ok(entries) = fs::read_dir(project_dir) else {
+        return sessions;
     };
 
     for entry in entries.flatten() {
@@ -227,9 +226,8 @@ fn load_index_cache(project_dir: &Path) -> HashMap<String, SessionEntryRaw> {
         return HashMap::new();
     }
 
-    let file = match File::open(&index_path) {
-        Ok(f) => f,
-        Err(_) => return HashMap::new(),
+    let Ok(file) = File::open(&index_path) else {
+        return HashMap::new();
     };
 
     let reader = BufReader::new(file);
@@ -377,10 +375,7 @@ pub fn parse_all_sessions(claude_dir: &Path) -> Result<Vec<SessionEntry>> {
         .with_context(|| format!("Failed to read projects directory: {:?}", projects_dir))?;
 
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let Ok(entry) = entry else { continue };
 
         let project_dir = entry.path();
         if !project_dir.is_dir() {
@@ -417,9 +412,8 @@ pub fn parse_all_sessions(claude_dir: &Path) -> Result<Vec<SessionEntry>> {
             } else {
                 // Not in cache - parse first prompt on-demand
                 // Skip sessions with no user content (empty/abandoned sessions)
-                let first_prompt = match parse_first_user_prompt(&session_file.path) {
-                    Some(prompt) => prompt,
-                    None => continue, // Skip empty sessions
+                let Some(first_prompt) = parse_first_user_prompt(&session_file.path) else {
+                    continue; // Skip empty sessions
                 };
 
                 // Create entry with minimal metadata

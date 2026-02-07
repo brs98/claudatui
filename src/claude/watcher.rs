@@ -1,6 +1,6 @@
 use anyhow::Result;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ pub struct SessionsWatcher {
 
 impl SessionsWatcher {
     /// Create a new watcher for sessions-index.json files
-    pub fn new(claude_dir: PathBuf) -> Result<Self> {
+    pub fn new(claude_dir: &Path) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
 
         let mut watcher = RecommendedWatcher::new(

@@ -97,6 +97,15 @@ impl WorktreeModalState {
     }
 }
 
+impl super::Modal for WorktreeModalState {
+    fn handle_key_modal(&mut self, key: KeyEvent) -> super::ModalKeyResult {
+        match self.handle_key(key) {
+            Some(branch_name) => super::ModalKeyResult::BranchSelected(branch_name),
+            None => super::ModalKeyResult::Continue,
+        }
+    }
+}
+
 /// Widget for rendering the worktree creation modal.
 pub struct WorktreeModal<'a> {
     state: &'a WorktreeModalState,

@@ -312,23 +312,28 @@ impl SessionManager {
     /// Clean up dead sessions.
     /// Returns the IDs of sessions that were removed.
     pub fn cleanup_dead(&mut self) -> Vec<SessionId> {
-        let dead: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|(_, s)| !s.is_alive())
-            .map(|(id, _)| id.clone())
-            .collect();
-
-        for id in &dead {
-            self.sessions.remove(id);
-        }
-
+        let mut dead = Vec::new();
+        self.sessions.retain(|id, s| {
+            if s.is_alive() {
+                true
+            } else {
+                dead.push(id.clone());
+                false
+            }
+        });
         dead
     }
 
     /// Get all session IDs (for iteration).
     pub fn session_ids(&self) -> Vec<SessionId> {
         self.sessions.keys().cloned().collect()
+    }
+
+    /// Resize all sessions to the given dimensions.
+    pub fn resize_all(&mut self, rows: u16, cols: u16) {
+        for session in self.sessions.values_mut() {
+            let _ = session.resize(rows, cols);
+        }
     }
 }
 
