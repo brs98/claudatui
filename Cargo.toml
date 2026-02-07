@@ -1,6 +1,6 @@
 [package]
 name = "claudatui"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "A TUI for browsing and managing Claude Code conversations"
 authors = ["Brandon"]
