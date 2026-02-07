@@ -396,8 +396,7 @@ fn execute_leader_action(app: &mut App, action: LeaderAction) -> Result<()> {
             app.toggle_dangerous_mode();
         }
         LeaderAction::AddConversation => {
-            // Open selected group and start new conversation
-            app.open_selected()?;
+            app.new_conversation_in_selected_group()?;
         }
         LeaderAction::CreateWorktree => {
             app.open_worktree_modal();

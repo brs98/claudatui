@@ -1074,6 +1074,7 @@ impl App {
     /// Unlike `open_selected()`, this always starts a fresh conversation regardless
     /// of which item type is selected (GroupHeader, Conversation, EphemeralSession, etc.).
     pub fn new_conversation_in_selected_group(&mut self) -> Result<()> {
+        self.clear_preview();
         let items = self.sidebar_items();
         let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
 
