@@ -46,8 +46,10 @@ pub enum LeaderAction {
     AddConversation,
 
     // Worktree
-    /// Create a new git worktree
+    /// Create a new git worktree from selected group
     CreateWorktree,
+    /// Open worktree search modal (pick any project)
+    WorktreeSearch,
 }
 
 /// A command entry in the which-key menu
@@ -177,8 +179,15 @@ impl WhichKeyConfig {
                     LeaderCommand::action('f', "cycle filter", LeaderAction::CycleArchiveFilter),
                 ],
             ),
-            // Worktree
-            LeaderCommand::action('w', "worktree", LeaderAction::CreateWorktree),
+            // Worktree submenu
+            LeaderCommand::submenu(
+                'w',
+                "worktree",
+                vec![
+                    LeaderCommand::action('w', "from group", LeaderAction::CreateWorktree),
+                    LeaderCommand::action('s', "search", LeaderAction::WorktreeSearch),
+                ],
+            ),
             // Other actions
             LeaderCommand::action('r', "refresh", LeaderAction::Refresh),
             LeaderCommand::action('y', "yank path", LeaderAction::YankPath),

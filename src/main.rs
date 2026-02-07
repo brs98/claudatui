@@ -31,7 +31,10 @@ use app::{
 use claudatui::input::which_key::{LeaderAction, LeaderKeyResult};
 use claudatui::input::InputMode;
 use ui::layout::create_layout_with_help_config;
-use ui::modal::{NewProjectModal, SearchKeyResult, SearchModal, WorktreeModal};
+use ui::modal::{
+    NewProjectModal, SearchKeyResult, SearchModal, WorktreeModal, WorktreeSearchKeyResult,
+    WorktreeSearchModal,
+};
 use ui::sidebar::{FilterKeyResult, Sidebar, SidebarContext};
 use ui::terminal_pane::TerminalPane;
 use ui::toast_widget::{ToastPosition, ToastWidget};
@@ -399,6 +402,9 @@ fn execute_leader_action(app: &mut App, action: LeaderAction) -> Result<()> {
         LeaderAction::CreateWorktree => {
             app.open_worktree_modal();
         }
+        LeaderAction::WorktreeSearch => {
+            app.open_worktree_search_modal();
+        }
     }
     Ok(())
 }
@@ -530,8 +536,15 @@ fn handle_terminal_insert_with_escape_seq(app: &mut App, key: KeyEvent) -> Resul
 
 /// Handle modal insert mode with jk/kj escape sequence detection
 fn handle_modal_insert_with_escape_seq(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
-    // Escape always closes the modal (keep this fast path)
+    // Escape handling: WorktreeSearch Phase 2 goes back to Phase 1 instead of closing
     if key.code == KeyCode::Esc {
+        if let ModalState::WorktreeSearch(ref state) = app.modal_state {
+            if state.phase == crate::ui::modal::worktree_search::WorktreeSearchPhase::BranchInput {
+                // Forward Esc to the modal so it can transition back to Phase 1
+                forward_key_to_modal(app, key)?;
+                return Ok(KeyAction::Continue);
+            }
+        }
         app.close_modal();
         return Ok(KeyAction::Continue);
     }
@@ -630,6 +643,21 @@ fn forward_key_to_modal(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.confirm_worktree(branch_name)?;
             }
         }
+        ModalState::WorktreeSearch(ref mut state) => match state.handle_key(key) {
+            WorktreeSearchKeyResult::Continue => {}
+            WorktreeSearchKeyResult::QueryChanged => {
+                state.refilter();
+            }
+            WorktreeSearchKeyResult::Confirmed {
+                project_path,
+                branch_name,
+            } => {
+                app.confirm_worktree_search(project_path, branch_name)?;
+            }
+            WorktreeSearchKeyResult::Close => {
+                app.close_modal();
+            }
+        },
     }
     Ok(())
 }
@@ -780,8 +808,9 @@ fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> 
             let _ = app.unarchive_selected_conversation();
         }
 
-        // Worktree: create a new git worktree in selected group
+        // Worktree: create from selected group (w) or search all projects (W)
         KeyCode::Char('w') => app.open_worktree_modal(),
+        KeyCode::Char('W') => app.open_worktree_search_modal(),
 
         // Inline sidebar filter
         KeyCode::Char('f') => app.activate_sidebar_filter(),
@@ -1100,6 +1129,11 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
         ModalState::Worktree(ref state) => {
             let area = WorktreeModal::calculate_area(f.area());
             let modal = WorktreeModal::new(state);
+            f.render_widget(modal, area);
+        }
+        ModalState::WorktreeSearch(ref mut state) => {
+            let area = WorktreeSearchModal::calculate_area(f.area());
+            let modal = WorktreeSearchModal::new(state);
             f.render_widget(modal, area);
         }
     }

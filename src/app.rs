@@ -22,7 +22,9 @@ use crate::input::which_key::WhichKeyConfig;
 use crate::input::{InputMode, LeaderState};
 use crate::search::SearchEngine;
 use crate::session::{ScreenState, SessionManager, SessionState};
-use crate::ui::modal::{NewProjectModalState, SearchModalState, WorktreeModalState};
+use crate::ui::modal::{
+    NewProjectModalState, SearchModalState, WorktreeModalState, WorktreeSearchModalState,
+};
 use crate::ui::sidebar::{
     build_sidebar_items, group_has_active_content, SidebarContext, SidebarItem, SidebarState,
 };
@@ -127,6 +129,8 @@ pub enum ModalState {
     Search(Box<SearchModalState>),
     /// Worktree creation modal is open
     Worktree(Box<WorktreeModalState>),
+    /// Worktree search modal (project picker + branch input)
+    WorktreeSearch(Box<WorktreeSearchModalState>),
 }
 
 /// Split mode configuration for dual-pane terminal layout.
@@ -2150,6 +2154,80 @@ impl App {
             Err(e) => {
                 // Keep modal open with error
                 if let ModalState::Worktree(ref mut state) = self.modal_state {
+                    state.error_message = Some(format!("{}", e));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Collect unique git projects from sidebar groups (deduplicated by repo path).
+    fn collect_worktree_projects(&self) -> Vec<crate::ui::modal::WorktreeProject> {
+        use crate::claude::worktree::detect_repo_info;
+        use crate::ui::modal::WorktreeProject;
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        let mut projects = Vec::new();
+
+        for group in &self.groups {
+            let Some(project_path) = group.project_path() else {
+                continue;
+            };
+            let Some(repo_info) = detect_repo_info(&project_path) else {
+                continue;
+            };
+            let repo_path = repo_info.repo_path().to_path_buf();
+            if seen.insert(repo_path.clone()) {
+                projects.push(WorktreeProject {
+                    display_name: repo_info.display_name(),
+                    project_path,
+                    repo_path,
+                });
+            }
+        }
+
+        projects
+    }
+
+    /// Open the worktree search modal (project picker + branch input).
+    pub fn open_worktree_search_modal(&mut self) {
+        let projects = self.collect_worktree_projects();
+        if projects.is_empty() {
+            self.toast_error("No git repositories found");
+            return;
+        }
+        let state = WorktreeSearchModalState::new(projects);
+        self.modal_state = ModalState::WorktreeSearch(Box::new(state));
+        self.input_mode = InputMode::Insert;
+    }
+
+    /// Confirm worktree creation from the worktree search modal.
+    pub fn confirm_worktree_search(
+        &mut self,
+        project_path: std::path::PathBuf,
+        branch_name: String,
+    ) -> Result<()> {
+        use crate::claude::worktree::{create_worktree, detect_repo_info};
+
+        let Some(repo_info) = detect_repo_info(&project_path) else {
+            if let ModalState::WorktreeSearch(ref mut state) = self.modal_state {
+                state.error_message = Some("Not a git repository".to_string());
+            }
+            return Ok(());
+        };
+
+        match create_worktree(&repo_info, &branch_name) {
+            Ok(worktree_path) => {
+                self.modal_state = ModalState::None;
+                self.toast_success(format!("Worktree '{}' created", branch_name));
+                self.start_session(&worktree_path, None)?;
+                self.selected_conversation = None;
+                self.focus = Focus::Terminal(TerminalPaneId::Primary);
+                self.enter_insert_mode();
+            }
+            Err(e) => {
+                if let ModalState::WorktreeSearch(ref mut state) = self.modal_state {
                     state.error_message = Some(format!("{}", e));
                 }
             }
