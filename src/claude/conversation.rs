@@ -54,6 +54,10 @@ struct JournalEntry {
     entry_type: String,
     /// Subtype for system entries (e.g., "turn_duration")
     subtype: Option<String>,
+    /// Present on "user" entries that are tool-use approval/rejection results,
+    /// not real user messages
+    #[serde(rename = "toolUseResult")]
+    tool_use_result: Option<serde_json::Value>,
 }
 
 /// Parse only the last few lines of a conversation to detect status efficiently.
@@ -95,8 +99,19 @@ pub fn detect_status_fast(path: &Path) -> Result<ConversationStatus> {
         // Skip noise entries that don't indicate conversation state
         if matches!(
             entry.entry_type.as_str(),
-            "progress" | "file-history-snapshot" | "pr-link"
+            "progress" | "file-history-snapshot" | "pr-link" | "queue-operation"
         ) {
+            continue;
+        }
+
+        // Skip system entries that aren't turn completion markers
+        if entry.entry_type == "system" && entry.subtype.as_deref() != Some("turn_duration") {
+            continue;
+        }
+
+        // Skip "user" entries that are tool-use results (approval/rejection),
+        // not real user messages — these are tool-loop noise
+        if entry.entry_type == "user" && entry.tool_use_result.is_some() {
             continue;
         }
 
@@ -242,5 +257,87 @@ mod tests {
         ]);
         // Brand new session with only a file snapshot → Idle
         assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::Idle);
+    }
+
+    #[test]
+    fn queue_operation_entries_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"queue-operation"}"#,
+        ]);
+        // queue-operation is skipped → assistant is last → WaitingForInput
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn system_local_command_entries_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"system","subtype":"local_command"}"#,
+        ]);
+        // system:local_command is skipped → assistant is last → WaitingForInput
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn tool_result_user_entries_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"user","toolUseResult":{"type":"tool_result","content":"ok"}}"#,
+        ]);
+        // Tool-result user entry is skipped → assistant is last → WaitingForInput
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn real_user_message_after_tool_result_returns_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"user","toolUseResult":{"type":"tool_result","content":"ok"}}"#,
+            r#"{"type":"user"}"#,
+        ]);
+        // Real user message (no toolUseResult) is last → Active
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::Active);
+    }
+
+    #[test]
+    fn multiple_tool_results_all_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"user","toolUseResult":{"type":"tool_result","content":"1"}}"#,
+            r#"{"type":"user","toolUseResult":{"type":"tool_result","content":"2"}}"#,
+            r#"{"type":"user","toolUseResult":{"type":"tool_result","content":"3"}}"#,
+        ]);
+        // All tool-result entries skipped → assistant is last → WaitingForInput
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn non_turn_duration_system_entries_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("test.jsonl");
+        write_jsonl(&p, &[
+            r#"{"type":"user"}"#,
+            r#"{"type":"assistant"}"#,
+            r#"{"type":"system","subtype":"compact_boundary"}"#,
+            r#"{"type":"system","subtype":"api_error"}"#,
+            r#"{"type":"system","subtype":"microcompact_boundary"}"#,
+        ]);
+        // All non-turn_duration system entries skipped → assistant is last → WaitingForInput
+        assert_eq!(detect_status_fast(&p).unwrap(), ConversationStatus::WaitingForInput);
     }
 }

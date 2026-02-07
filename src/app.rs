@@ -332,6 +332,10 @@ pub struct App {
     pub terminal_inner_area: Option<Rect>,
     /// Last time we polled JSONL status for running sessions
     last_live_status_poll: Option<Instant>,
+    /// JSONL file sizes recorded at session resume time.
+    /// Used to detect stale Active status: if the file hasn't grown since resume,
+    /// Claude hasn't actually started processing yet, so override Active → WaitingForInput.
+    resume_jsonl_sizes: HashMap<String, u64>,
 }
 
 impl App {
@@ -395,6 +399,7 @@ impl App {
             text_selection: None,
             terminal_inner_area: None,
             last_live_status_poll: None,
+            resume_jsonl_sizes: HashMap::new(),
         };
 
         app.load_conversations_full()?;
@@ -449,7 +454,14 @@ impl App {
 
                 Conversation {
                     session_id: session.session_id,
-                    display: session.summary.clone().unwrap_or(session.first_prompt),
+                    display: session.summary.clone().unwrap_or_else(|| {
+                        let stripped = session.first_prompt
+                            .strip_prefix("Implement the following plan:\n")
+                            .or_else(|| session.first_prompt.strip_prefix("Implement the following plan:"))
+                            .unwrap_or(&session.first_prompt)
+                            .trim();
+                        stripped.strip_prefix("# ").unwrap_or(stripped).to_string()
+                    }),
                     summary: session.summary,
                     timestamp: session.file_mtime,
                     modified: session.modified,
@@ -605,9 +617,17 @@ impl App {
         // Priority 2 & 3: Check conversations (running first, then active status)
         let conversations = group.conversations();
 
-        // First pass: find running conversations (excluding running plan implementations)
+        // Plan impls are only hidden when orchestrated by a running parent
+        let group_has_running_parent = conversations.iter().any(|c| {
+            !c.is_plan_implementation && running.contains(&c.session_id)
+        });
+
+        // First pass: find running conversations (excluding orchestrated plan implementations)
         for (conv_idx, conv) in conversations.iter().enumerate() {
-            if conv.is_plan_implementation && running.contains(&conv.session_id) {
+            if conv.is_plan_implementation
+                && !running.contains(&conv.session_id)
+                && group_has_running_parent
+            {
                 continue;
             }
             if running.contains(&conv.session_id) {
@@ -627,7 +647,10 @@ impl App {
 
         // Second pass: find conversations with Active or WaitingForInput status
         for (conv_idx, conv) in conversations.iter().enumerate() {
-            if conv.is_plan_implementation && running.contains(&conv.session_id) {
+            if conv.is_plan_implementation
+                && !running.contains(&conv.session_id)
+                && group_has_running_parent
+            {
                 continue;
             }
             if matches!(
@@ -836,6 +859,14 @@ impl App {
                     } else {
                         // Start new session with --resume
                         self.start_session(&conversation.project_path, Some(&claude_session_id))?;
+                        self.record_resume_jsonl_size(
+                            &claude_session_id,
+                            &conversation.project_path,
+                        );
+                        self.update_conversation_status_in_groups(
+                            &claude_session_id,
+                            ConversationStatus::WaitingForInput,
+                        );
                     }
                     self.focus = Focus::Terminal(TerminalPaneId::Primary);
                     self.enter_insert_mode();
@@ -994,7 +1025,7 @@ impl App {
                     }
                 }
 
-                if let Some((path, claude_session_id, conv)) = target {
+                if let Some((path, claude_session_id, mut conv)) = target {
                     // Check if the working directory still exists
                     if !path.exists() {
                         // Directory was deleted (e.g., git worktree removed)
@@ -1015,6 +1046,18 @@ impl App {
                     } else {
                         // Start new session with --resume
                         self.start_session(&path, Some(&claude_session_id))?;
+
+                        // Record JSONL file size at resume time so we can detect
+                        // stale Active status (file hasn't grown = Claude hasn't
+                        // started processing yet)
+                        self.record_resume_jsonl_size(&claude_session_id, &path);
+
+                        // Force status to WaitingForInput until Claude actually writes
+                        self.update_conversation_status_in_groups(
+                            &claude_session_id,
+                            ConversationStatus::WaitingForInput,
+                        );
+                        conv.status = ConversationStatus::WaitingForInput;
                     }
                     self.selected_conversation = Some(conv);
                     self.focus = Focus::Terminal(TerminalPaneId::Primary);
@@ -1221,13 +1264,6 @@ impl App {
 
                 self.active_session_id = Some(session_id);
 
-                // Set conversation status to Active
-                if let Some(ref mut conv) = self.selected_conversation {
-                    conv.status = ConversationStatus::Active;
-                    let sid = conv.session_id.clone();
-                    self.update_conversation_status_in_groups(&sid, ConversationStatus::Active);
-                }
-
                 self.toast_success("Session started");
                 Ok(())
             }
@@ -1409,8 +1445,10 @@ impl App {
             self.ephemeral_sessions.remove(&session_id);
 
             // Re-read conversation status from file
-            if let Some(Some(cid)) = claude_id {
-                self.refresh_session_status(&cid);
+            if let Some(Some(ref cid)) = claude_id {
+                // Clean up resume baseline — session is dead, no need to track
+                self.resume_jsonl_sizes.remove(cid.as_str());
+                self.refresh_session_status(cid);
             }
 
             // Clear preview if the dead session was being previewed
@@ -1458,11 +1496,29 @@ impl App {
                 .join(&escaped_path)
                 .join(format!("{}.jsonl", session_id));
 
-            let status = if conv_path.exists() {
+            let mut status = if conv_path.exists() {
                 detect_status_fast(&conv_path).unwrap_or(ConversationStatus::Idle)
             } else {
                 ConversationStatus::Idle
             };
+
+            // If we have a resume baseline for this session, check whether the
+            // JSONL file has actually grown. If not, Claude hasn't started
+            // processing yet — override Active → WaitingForInput.
+            if status == ConversationStatus::Active {
+                if let Some(&baseline_size) = self.resume_jsonl_sizes.get(session_id) {
+                    let current_size = std::fs::metadata(&conv_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    if current_size <= baseline_size {
+                        // File hasn't grown — Claude hasn't started yet
+                        status = ConversationStatus::WaitingForInput;
+                    } else {
+                        // File grew — Claude is actually processing, clear baseline
+                        self.resume_jsonl_sizes.remove(session_id);
+                    }
+                }
+            }
 
             self.update_conversation_status_in_groups(session_id, status);
 
@@ -1472,6 +1528,23 @@ impl App {
                     conv.status = status;
                 }
             }
+        }
+    }
+
+    /// Record the current JSONL file size for a session being resumed.
+    /// This lets us detect stale Active status when `detect_status_fast` reads
+    /// old data before Claude has started processing the resumed session.
+    fn record_resume_jsonl_size(&mut self, claude_session_id: &str, project_path: &std::path::Path) {
+        let escaped = project_path.to_string_lossy().replace('/', "-");
+        let jsonl_path = self
+            .claude_dir
+            .join("projects")
+            .join(&escaped)
+            .join(format!("{}.jsonl", claude_session_id));
+
+        if let Ok(meta) = std::fs::metadata(&jsonl_path) {
+            self.resume_jsonl_sizes
+                .insert(claude_session_id.to_string(), meta.len());
         }
     }
 
@@ -1750,6 +1823,10 @@ impl App {
     /// Close a session by its ID, cleaning up all associated state
     pub fn close_session(&mut self, session_id: &str) {
         self.session_manager.close_session(session_id);
+        // Clean up resume baseline before removing the claude ID mapping
+        if let Some(Some(claude_id)) = self.session_to_claude_id.get(session_id) {
+            self.resume_jsonl_sizes.remove(claude_id.as_str());
+        }
         self.session_to_claude_id.remove(session_id);
         self.ephemeral_sessions.remove(session_id);
 
@@ -1994,7 +2071,7 @@ impl App {
             }
         }
 
-        let Some((group_key, conv_idx, conv)) = target else {
+        let Some((group_key, conv_idx, mut conv)) = target else {
             self.toast_error("Conversation not found");
             return Ok(false);
         };
@@ -2037,6 +2114,12 @@ impl App {
             self.active_session_id = Some(sid);
         } else {
             self.start_session(&project_path, Some(session_id))?;
+            self.record_resume_jsonl_size(session_id, &project_path);
+            self.update_conversation_status_in_groups(
+                session_id,
+                ConversationStatus::WaitingForInput,
+            );
+            conv.status = ConversationStatus::WaitingForInput;
         }
         self.selected_conversation = Some(conv);
         self.focus = Focus::Terminal(TerminalPaneId::Primary);
