@@ -14,6 +14,13 @@ use claudatui::app::App;
 use claudatui::event_loop::{run_app, HotReloadAction};
 
 fn main() -> Result<()> {
+    // Handle --version / -V before any terminal setup
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("claudatui {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     // Check if we're in a proper terminal
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("claudatui must be run in an interactive terminal");
