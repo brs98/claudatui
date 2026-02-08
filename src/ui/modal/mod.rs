@@ -6,11 +6,13 @@ use crossterm::event::KeyEvent;
 
 pub mod new_project;
 pub mod search;
+pub mod workspace;
 pub mod worktree;
 pub mod worktree_search;
 
 pub use new_project::{NewProjectModal, NewProjectModalState, NewProjectTab};
 pub use search::{SearchKeyResult, SearchModal, SearchModalState};
+pub use workspace::{WorkspaceModal, WorkspaceModalState};
 pub use worktree::{WorktreeModal, WorktreeModalState};
 pub use worktree_search::{
     WorktreeProject, WorktreeSearchKeyResult, WorktreeSearchModal, WorktreeSearchModalState,
@@ -37,6 +39,10 @@ pub enum ModalKeyResult {
     },
     /// Query changed in worktree search.
     WorktreeSearchQueryChanged,
+    /// A workspace directory was added.
+    WorkspaceAdded(String),
+    /// A workspace directory was removed (by index).
+    WorkspaceRemoved(usize),
 }
 
 /// Trait for unified modal key dispatch.

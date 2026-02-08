@@ -18,7 +18,9 @@ use crate::handlers::keyboard::{flush_buffered_key, handle_key_event};
 use crate::handlers::mouse::handle_mouse_event;
 use crate::input::InputMode;
 use crate::ui::layout::create_layout_with_help_config;
-use crate::ui::modal::{NewProjectModal, SearchModal, WorktreeModal, WorktreeSearchModal};
+use crate::ui::modal::{
+    NewProjectModal, SearchModal, WorkspaceModal, WorktreeModal, WorktreeSearchModal,
+};
 use crate::ui::sidebar::{Sidebar, SidebarContext};
 use crate::ui::terminal_pane::TerminalPane;
 use crate::ui::toast_widget::{ToastPosition, ToastWidget};
@@ -142,10 +144,10 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
         ephemeral_sessions: &app.ephemeral_sessions,
         hide_inactive: app.sidebar_state.hide_inactive,
         archive_filter: app.sidebar_state.archive_filter,
-        bookmark_manager: &app.bookmark_manager,
         filter_query: &filter_query,
         filter_active: app.sidebar_state.filter_active,
         filter_cursor_pos: app.sidebar_state.filter_cursor_pos,
+        workspaces: &app.config.workspaces,
     };
 
     // Draw sidebar with running session indicators and ephemeral sessions
@@ -240,6 +242,11 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
         crate::app::ModalState::WorktreeSearch(ref mut state) => {
             let area = WorktreeSearchModal::calculate_area(f.area());
             let modal = WorktreeSearchModal::new(state);
+            f.render_widget(modal, area);
+        }
+        crate::app::ModalState::Workspace(ref mut state) => {
+            let area = WorkspaceModal::calculate_area(f.area());
+            let modal = WorkspaceModal::new(state);
             f.render_widget(modal, area);
         }
     }

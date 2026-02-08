@@ -7,14 +7,6 @@
 /// Actions that can be triggered via the leader key menu
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LeaderAction {
-    // Bookmark actions
-    /// Jump to bookmark slot (1-9)
-    BookmarkJump(u8),
-    /// Set bookmark at slot (1-9)
-    BookmarkSet(u8),
-    /// Delete bookmark at slot (1-9)
-    BookmarkDelete(u8),
-
     // Navigation/Search
     /// Open search modal
     SearchOpen,
@@ -50,6 +42,8 @@ pub enum LeaderAction {
     CreateWorktree,
     /// Open worktree search modal (pick any project)
     WorktreeSearch,
+    /// Open workspace management modal
+    ManageWorkspaces,
 }
 
 /// A command entry in the which-key menu
@@ -119,51 +113,6 @@ impl WhichKeyConfig {
     /// Build the default command tree
     fn default_commands() -> Vec<LeaderCommand> {
         vec![
-            // Bookmarks submenu
-            LeaderCommand::submenu(
-                'b',
-                "bookmarks",
-                vec![
-                    // Jump to bookmark slots 1-9
-                    LeaderCommand::action('1', "slot 1", LeaderAction::BookmarkJump(1)),
-                    LeaderCommand::action('2', "slot 2", LeaderAction::BookmarkJump(2)),
-                    LeaderCommand::action('3', "slot 3", LeaderAction::BookmarkJump(3)),
-                    LeaderCommand::action('4', "slot 4", LeaderAction::BookmarkJump(4)),
-                    LeaderCommand::action('5', "slot 5", LeaderAction::BookmarkJump(5)),
-                    LeaderCommand::action('6', "slot 6", LeaderAction::BookmarkJump(6)),
-                    LeaderCommand::action('7', "slot 7", LeaderAction::BookmarkJump(7)),
-                    LeaderCommand::action('8', "slot 8", LeaderAction::BookmarkJump(8)),
-                    LeaderCommand::action('9', "slot 9", LeaderAction::BookmarkJump(9)),
-                    // Mark (set bookmark) submenu
-                    LeaderCommand::submenu(
-                        'm',
-                        "mark",
-                        (1..=9)
-                            .map(|i| {
-                                LeaderCommand::action(
-                                    char::from_digit(i, 10).expect("digit index is in range 1..=9"),
-                                    format!("slot {}", i),
-                                    LeaderAction::BookmarkSet(i as u8),
-                                )
-                            })
-                            .collect(),
-                    ),
-                    // Delete bookmark submenu
-                    LeaderCommand::submenu(
-                        'd',
-                        "delete",
-                        (1..=9)
-                            .map(|i| {
-                                LeaderCommand::action(
-                                    char::from_digit(i, 10).expect("digit index is in range 1..=9"),
-                                    format!("slot {}", i),
-                                    LeaderAction::BookmarkDelete(i as u8),
-                                )
-                            })
-                            .collect(),
-                    ),
-                ],
-            ),
             // Direct actions
             LeaderCommand::action('/', "search", LeaderAction::SearchOpen),
             LeaderCommand::action('n', "new project", LeaderAction::NewProject),
@@ -187,6 +136,16 @@ impl WhichKeyConfig {
                     LeaderCommand::action('w', "from group", LeaderAction::CreateWorktree),
                     LeaderCommand::action('s', "search", LeaderAction::WorktreeSearch),
                 ],
+            ),
+            // Project submenu
+            LeaderCommand::submenu(
+                'p',
+                "project",
+                vec![LeaderCommand::action(
+                    'p',
+                    "workspaces",
+                    LeaderAction::ManageWorkspaces,
+                )],
             ),
             // Other actions
             LeaderCommand::action('r', "refresh", LeaderAction::Refresh),
@@ -270,35 +229,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn commands_at_root_includes_bookmark_and_search_keys() {
+    fn commands_at_root_includes_search_and_action_keys() {
         let config = WhichKeyConfig::new();
         let commands = config.commands_at_path(&[]).unwrap();
         assert!(!commands.is_empty());
-        assert!(commands.iter().any(|c| c.key == 'b'));
         assert!(commands.iter().any(|c| c.key == '/'));
-    }
-
-    #[test]
-    fn commands_at_bookmark_path_includes_slot_and_mark_keys() {
-        let config = WhichKeyConfig::new();
-        let commands = config.commands_at_path(&['b']).unwrap();
-        assert!(commands.iter().any(|c| c.key == '1'));
-        assert!(commands.iter().any(|c| c.key == 'm'));
-    }
-
-    #[test]
-    fn process_key_executes_bookmark_jump_for_slot_key() {
-        let config = WhichKeyConfig::new();
-        match config.process_key(&['b'], '1') {
-            LeaderKeyResult::Execute(LeaderAction::BookmarkJump(1)) => {}
-            other => panic!("Expected BookmarkJump(1), got {:?}", other),
-        }
+        assert!(commands.iter().any(|c| c.key == 'x'));
     }
 
     #[test]
     fn process_key_returns_submenu_for_group_key() {
         let config = WhichKeyConfig::new();
-        assert_eq!(config.process_key(&[], 'b'), LeaderKeyResult::Submenu);
+        assert_eq!(config.process_key(&[], 'x'), LeaderKeyResult::Submenu);
     }
 
     #[test]
@@ -311,6 +253,23 @@ mod tests {
     fn submenu_title_returns_correct_label_for_each_path() {
         let config = WhichKeyConfig::new();
         assert_eq!(config.submenu_title(&[]), "Leader");
-        assert_eq!(config.submenu_title(&['b']), "Bookmarks");
+        assert_eq!(config.submenu_title(&['x']), "Archive");
+    }
+
+    #[test]
+    fn project_submenu_is_accessible() {
+        let config = WhichKeyConfig::new();
+        assert_eq!(config.process_key(&[], 'p'), LeaderKeyResult::Submenu);
+        assert_eq!(
+            config.process_key(&['p'], 'p'),
+            LeaderKeyResult::Execute(LeaderAction::ManageWorkspaces)
+        );
+        assert_eq!(config.submenu_title(&['p']), "Project");
+    }
+
+    #[test]
+    fn worktree_submenu_has_no_workspace_key() {
+        let config = WhichKeyConfig::new();
+        assert_eq!(config.process_key(&['w'], 'p'), LeaderKeyResult::Cancel);
     }
 }

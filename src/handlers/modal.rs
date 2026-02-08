@@ -36,6 +36,12 @@ pub(crate) fn forward_key_to_modal(app: &mut App, key: KeyEvent) -> Result<()> {
             app.confirm_worktree_search(&project_path, &branch_name)?;
         }
         ModalKeyResult::WorktreeSearchQueryChanged => {}
+        ModalKeyResult::WorkspaceAdded(path) => {
+            app.add_workspace(&path);
+        }
+        ModalKeyResult::WorkspaceRemoved(idx) => {
+            app.remove_workspace(idx);
+        }
     }
     Ok(())
 }

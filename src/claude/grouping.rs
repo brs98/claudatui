@@ -87,6 +87,58 @@ impl ConversationGroup {
         }
     }
 
+    /// Get the project key for grouping multiple worktrees/branches under one project.
+    ///
+    /// - Worktree → repo_path (shared across branches)
+    /// - Directory → "dir:{parent}:{project}" from project_path() or key
+    /// - Ungrouped → path string
+    pub fn project_key(&self) -> String {
+        match self {
+            Self::Worktree { repo_path, .. } => repo_path.to_string_lossy().into_owned(),
+            Self::Directory {
+                parent, project, ..
+            } => format!("dir:{}:{}", parent, project),
+            Self::Ungrouped { path, .. } => path.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Get the display name for a project header (parent of worktrees).
+    ///
+    /// - Worktree → repo name (e.g., "claudatui")
+    /// - Directory → "parent/project"
+    /// - Ungrouped → file_name of path
+    pub fn project_display_name(&self) -> String {
+        match self {
+            Self::Worktree { repo_path, .. } => repo_path
+                .file_name()
+                .map(|n| n.to_string_lossy().replace(".git", ""))
+                .unwrap_or_else(|| "repo".to_string()),
+            Self::Directory {
+                parent, project, ..
+            } => format!("{}/{}", parent, project),
+            Self::Ungrouped { path, .. } => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+        }
+    }
+
+    /// Get the simplified group label when displayed under a ProjectHeader.
+    ///
+    /// - Worktree → branch name (e.g., "main", "feature-branch")
+    /// - Directory → project name
+    /// - Ungrouped → file_name of path
+    pub fn group_label(&self) -> String {
+        match self {
+            Self::Worktree { branch, .. } => branch.clone(),
+            Self::Directory { project, .. } => project.clone(),
+            Self::Ungrouped { path, .. } => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+        }
+    }
+
     /// Get the project path for this group (for spawning new conversations)
     pub fn project_path(&self) -> Option<PathBuf> {
         match self {

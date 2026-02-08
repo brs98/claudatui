@@ -184,11 +184,16 @@ impl App {
             SidebarItem::GroupHeader { key, .. } => Some(key.clone()),
             SidebarItem::Conversation { group_key, .. } => Some(group_key.clone()),
             SidebarItem::EphemeralSession { group_key, .. } => Some(group_key.clone()),
-            SidebarItem::ShowMoreConversations { group_key, .. } => Some(group_key.clone()),
-            SidebarItem::ShowMoreProjects { .. } => None,
-            SidebarItem::BookmarkHeader
-            | SidebarItem::BookmarkEntry { .. }
-            | SidebarItem::BookmarkSeparator => None,
+            SidebarItem::SectionControl {
+                key,
+                kind: crate::ui::sidebar::SectionKind::Conversations,
+                ..
+            } => Some(key.clone()),
+            SidebarItem::SectionControl { .. }
+            | SidebarItem::OtherHeader { .. }
+            | SidebarItem::WorkspaceSectionHeader
+            | SidebarItem::AddWorkspace
+            | SidebarItem::ProjectHeader { .. } => None,
         })
     }
 
@@ -452,15 +457,36 @@ impl App {
                 | SidebarItem::EphemeralSession { group_key, .. } => {
                     self.sidebar_state.toggle_group(group_key);
                 }
-                SidebarItem::ShowMoreProjects { .. } => {
-                    self.sidebar_state.toggle_show_all_projects();
+                SidebarItem::SectionControl { key, kind, action } => {
+                    use crate::ui::sidebar::{ControlAction, SectionKind};
+                    let map = match kind {
+                        SectionKind::Conversations => &mut self.sidebar_state.visible_conversations,
+                        SectionKind::Groups => &mut self.sidebar_state.visible_groups,
+                    };
+                    match action {
+                        ControlAction::ShowMore(hidden) => {
+                            // total = current visible + hidden
+                            let current = SidebarState::visible_count(map, key);
+                            SidebarState::show_more(map, key, current + hidden);
+                        }
+                        ControlAction::ShowAll(total) => {
+                            SidebarState::show_all(map, key, *total);
+                        }
+                        ControlAction::ShowFewer => {
+                            SidebarState::show_fewer(map, key);
+                        }
+                        ControlAction::Collapse => {
+                            SidebarState::collapse_to_default(map, key);
+                        }
+                    }
                 }
-                SidebarItem::ShowMoreConversations { group_key, .. } => {
-                    self.sidebar_state.toggle_expanded_conversations(group_key);
+                SidebarItem::OtherHeader { .. } => {
+                    self.sidebar_state.toggle_other_collapsed();
                 }
-                SidebarItem::BookmarkHeader
-                | SidebarItem::BookmarkEntry { .. }
-                | SidebarItem::BookmarkSeparator => {}
+                SidebarItem::ProjectHeader { project_key, .. } => {
+                    self.sidebar_state.toggle_project(project_key);
+                }
+                SidebarItem::WorkspaceSectionHeader | SidebarItem::AddWorkspace => {}
             }
         }
     }
@@ -484,12 +510,12 @@ impl App {
                 }
                 SidebarItem::GroupHeader { .. }
                 | SidebarItem::EphemeralSession { .. }
-                | SidebarItem::ShowMoreProjects { .. }
-                | SidebarItem::ShowMoreConversations { .. }
-                | SidebarItem::BookmarkHeader
-                | SidebarItem::BookmarkEntry { .. }
-                | SidebarItem::BookmarkSeparator => {
-                    // No conversation selected for headers, ephemeral sessions, bookmarks, or "show more" items
+                | SidebarItem::SectionControl { .. }
+                | SidebarItem::OtherHeader { .. }
+                | SidebarItem::ProjectHeader { .. }
+                | SidebarItem::WorkspaceSectionHeader
+                | SidebarItem::AddWorkspace => {
+                    // No conversation selected for headers, ephemeral sessions, or section controls
                 }
             }
         }
@@ -546,76 +572,6 @@ impl App {
     pub fn navigate_to_index(&mut self, index: usize) {
         self.sidebar_state.list_state.select(Some(index));
         self.update_selected_conversation();
-    }
-
-    /// Jump to a group by key
-    pub(crate) fn jump_to_group(&mut self, group_key: &str, bookmark_name: &str) -> Result<bool> {
-        // Find the group
-        let group_idx = self.groups.iter().position(|g| g.key() == group_key);
-
-        if group_idx.is_some() {
-            // Ensure group is visible
-            self.sidebar_state.collapsed_groups.remove(group_key);
-            self.sidebar_state.show_all_projects = true;
-
-            // Find the group header in sidebar items
-            let items = self.sidebar_items();
-            if let Some(item_idx) = items.iter().position(
-                |item| matches!(item, SidebarItem::GroupHeader { key, .. } if key == group_key),
-            ) {
-                self.sidebar_state.list_state.select(Some(item_idx));
-                self.update_selected_conversation();
-                self.toast_success(format!("Jumped to '{}'", bookmark_name));
-                return Ok(true);
-            }
-        }
-
-        self.toast_error(format!("Project '{}' no longer exists", bookmark_name));
-        Ok(false)
-    }
-
-    /// Jump to a specific conversation
-    pub(crate) fn jump_to_conversation(
-        &mut self,
-        group_key: &str,
-        session_id: &str,
-        bookmark_name: &str,
-    ) -> Result<bool> {
-        // Find the group
-        let group_idx = self.groups.iter().position(|g| g.key() == group_key);
-
-        if let Some(gidx) = group_idx {
-            // Ensure the conversation is visible in the sidebar
-            self.sidebar_state.collapsed_groups.remove(group_key);
-            self.sidebar_state
-                .expanded_conversations
-                .insert(group_key.to_string());
-            self.sidebar_state.show_all_projects = true;
-
-            // Find the conversation within the group
-            let group = &self.groups[gidx];
-            let conv_idx = group
-                .conversations()
-                .iter()
-                .position(|c| c.session_id == session_id);
-
-            if let Some(cidx) = conv_idx {
-                // Find the conversation in sidebar items
-                let items = self.sidebar_items();
-                if let Some(item_idx) = items.iter().position(|item| {
-                    matches!(item, SidebarItem::Conversation { group_key: gk, index }
-                        if gk == group_key && *index == cidx)
-                }) {
-                    self.sidebar_state.list_state.select(Some(item_idx));
-                    self.update_selected_conversation();
-                    self.toast_success(format!("Jumped to '{}'", bookmark_name));
-                    return Ok(true);
-                }
-            }
-        }
-
-        self.toast_error(format!("Conversation '{}' no longer exists", bookmark_name));
-        Ok(false)
     }
 
     /// Activate the sidebar filter input and enter insert mode

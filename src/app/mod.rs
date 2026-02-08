@@ -15,7 +15,6 @@ use crossterm::event::KeyEvent;
 
 use ratatui::layout::Rect;
 
-use crate::bookmarks::{Bookmark, BookmarkManager, BookmarkTarget};
 use crate::claude::archive::ArchiveManager;
 use crate::claude::conversation::{detect_status_fast, Conversation, ConversationStatus};
 use crate::claude::grouping::{
@@ -29,7 +28,8 @@ use crate::input::{InputMode, LeaderState};
 use crate::search::SearchEngine;
 use crate::session::{ScreenState, SessionManager, SessionState};
 use crate::ui::modal::{
-    Modal, NewProjectModalState, SearchModalState, WorktreeModalState, WorktreeSearchModalState,
+    Modal, NewProjectModalState, SearchModalState, WorkspaceModalState, WorktreeModalState,
+    WorktreeSearchModalState,
 };
 use crate::ui::sidebar::{
     build_sidebar_items, group_has_active_content, SidebarContext, SidebarItem, SidebarState,
@@ -54,6 +54,8 @@ pub enum ModalState {
     Worktree(Box<WorktreeModalState>),
     /// Worktree search modal (project picker + branch input)
     WorktreeSearch(Box<WorktreeSearchModalState>),
+    /// Workspace management modal
+    Workspace(Box<WorkspaceModalState>),
 }
 
 impl ModalState {
@@ -65,6 +67,7 @@ impl ModalState {
             ModalState::Search(state) => Some(state.as_mut()),
             ModalState::Worktree(state) => Some(state.as_mut()),
             ModalState::WorktreeSearch(state) => Some(state.as_mut()),
+            ModalState::Workspace(state) => Some(state.as_mut()),
         }
     }
 }
@@ -207,8 +210,6 @@ pub struct App {
     pub modal_state: ModalState,
     /// Toast notification manager
     pub toast_manager: ToastManager,
-    /// Bookmark manager for quick access to projects/conversations
-    pub bookmark_manager: BookmarkManager,
     /// Archive manager for persisting archive state
     pub archive_manager: ArchiveManager,
     /// Archive status for feedback display
@@ -285,7 +286,6 @@ impl App {
             dangerous_mode_toggled_at: None,
             modal_state: ModalState::None,
             toast_manager: ToastManager::new(),
-            bookmark_manager: BookmarkManager::load().unwrap_or_else(|_| BookmarkManager::empty()),
             archive_manager,
             archive_status: ArchiveStatus::None,
             search_engine,
@@ -388,16 +388,18 @@ impl App {
             ephemeral_sessions: &self.ephemeral_sessions,
             hide_inactive: self.sidebar_state.hide_inactive,
             archive_filter: self.sidebar_state.archive_filter,
-            bookmark_manager: &self.bookmark_manager,
             filter_query: &self.sidebar_state.filter_query,
             filter_active: self.sidebar_state.filter_active,
             filter_cursor_pos: self.sidebar_state.filter_cursor_pos,
+            workspaces: &self.config.workspaces,
         };
         build_sidebar_items(
             &ctx,
             &self.sidebar_state.collapsed_groups,
-            self.sidebar_state.show_all_projects,
-            &self.sidebar_state.expanded_conversations,
+            &self.sidebar_state.collapsed_projects,
+            &self.sidebar_state.visible_conversations,
+            &self.sidebar_state.visible_groups,
+            self.sidebar_state.other_collapsed,
         )
     }
 

@@ -147,10 +147,10 @@ mod tests {
     }
 
     #[test]
-    fn build_title_shows_submenu_label_for_bookmark_path() {
+    fn build_title_shows_submenu_label_for_archive_path() {
         let config = WhichKeyConfig::new();
-        let widget = WhichKeyWidget::new(&config, &['b']);
-        assert_eq!(widget.build_title(), "SPC b | Bookmarks");
+        let widget = WhichKeyWidget::new(&config, &['x']);
+        assert_eq!(widget.build_title(), "SPC x | Archive");
     }
 
     #[test]

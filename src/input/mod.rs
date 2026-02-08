@@ -48,7 +48,7 @@ impl InputMode {
 /// State for leader key mode, tracking the current path through the command tree
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeaderState {
-    /// Keys pressed so far in the leader sequence (e.g., ['b'] for bookmark submenu)
+    /// Keys pressed so far in the leader sequence (e.g., ['x'] for archive submenu)
     pub path: Vec<char>,
     /// When leader mode was started (for timeout)
     pub started_at: Instant,

@@ -18,6 +18,13 @@ pub struct Config {
     /// Whether dangerous mode (--dangerously-skip-permissions) is enabled
     #[serde(default = "default_dangerous_mode")]
     pub dangerous_mode: bool,
+
+    /// Workspace directories for sidebar filtering.
+    /// When non-empty, only projects under these paths appear as primary groups;
+    /// everything else is placed in a collapsible "Other" section.
+    /// Uses prefix matching (e.g., "/Users/brandon/work" includes all projects under that tree).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<String>,
 }
 
 fn default_dangerous_mode() -> bool {
@@ -29,6 +36,7 @@ impl Default for Config {
         Self {
             layout: LayoutConfig::default(),
             dangerous_mode: true,
+            workspaces: Vec::new(),
         }
     }
 }
@@ -68,6 +76,18 @@ impl Config {
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
 
         Ok(())
+    }
+
+    /// Check if any workspaces are configured
+    pub fn has_workspaces(&self) -> bool {
+        !self.workspaces.is_empty()
+    }
+
+    /// Check if a project path falls under any configured workspace directory (prefix match)
+    pub fn is_in_workspace(&self, project_path: &str) -> bool {
+        self.workspaces
+            .iter()
+            .any(|ws| project_path.starts_with(ws.as_str()))
     }
 
     /// Get the path to the config file
@@ -179,5 +199,55 @@ mod tests {
             parsed.layout.sidebar_width_pct,
             config.layout.sidebar_width_pct
         );
+    }
+
+    #[test]
+    fn workspaces_empty_by_default_and_skipped_in_serialization() {
+        let config = Config::default();
+        assert!(!config.has_workspaces());
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("workspaces"));
+    }
+
+    #[test]
+    fn workspaces_roundtrip_through_json() {
+        let config = Config {
+            workspaces: vec!["/Users/brandon/work".to_string()],
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("workspaces"));
+        let parsed: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.workspaces, vec!["/Users/brandon/work"]);
+    }
+
+    #[test]
+    fn is_in_workspace_uses_prefix_matching() {
+        let config = Config {
+            workspaces: vec![
+                "/Users/brandon/work".to_string(),
+                "/Users/brandon/personal".to_string(),
+            ],
+            ..Config::default()
+        };
+        assert!(config.is_in_workspace("/Users/brandon/work/project-a"));
+        assert!(config.is_in_workspace("/Users/brandon/personal/claudatui"));
+        assert!(!config.is_in_workspace("/Users/brandon/other/project"));
+        assert!(!config.is_in_workspace("/tmp/random"));
+    }
+
+    #[test]
+    fn is_in_workspace_returns_false_when_no_workspaces() {
+        let config = Config::default();
+        assert!(!config.is_in_workspace("/any/path"));
+    }
+
+    #[test]
+    fn has_workspaces_returns_true_when_configured() {
+        let config = Config {
+            workspaces: vec!["/some/path".to_string()],
+            ..Config::default()
+        };
+        assert!(config.has_workspaces());
     }
 }

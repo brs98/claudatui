@@ -100,19 +100,39 @@ impl App {
                 self.focus = Focus::Terminal(TerminalPaneId::Primary);
                 self.enter_insert_mode();
             }
-            Some(SidebarItem::ShowMoreProjects { .. }) => {
-                // Toggle showing all projects
-                self.sidebar_state.toggle_show_all_projects();
+            Some(SidebarItem::SectionControl { key, kind, action }) => {
+                // Handle section controls (show more/all/fewer/collapse)
+                use crate::ui::sidebar::{ControlAction, SectionKind};
+                let map = match kind {
+                    SectionKind::Conversations => &mut self.sidebar_state.visible_conversations,
+                    SectionKind::Groups => &mut self.sidebar_state.visible_groups,
+                };
+                match action {
+                    ControlAction::ShowMore(hidden) => {
+                        let current = SidebarState::visible_count(map, key);
+                        SidebarState::show_more(map, key, current + hidden);
+                    }
+                    ControlAction::ShowAll(total) => {
+                        SidebarState::show_all(map, key, *total);
+                    }
+                    ControlAction::ShowFewer => {
+                        SidebarState::show_fewer(map, key);
+                    }
+                    ControlAction::Collapse => {
+                        SidebarState::collapse_to_default(map, key);
+                    }
+                }
             }
-            Some(SidebarItem::ShowMoreConversations { group_key, .. }) => {
-                // Toggle showing all conversations for this group
-                self.sidebar_state.toggle_expanded_conversations(group_key);
+            Some(SidebarItem::OtherHeader { .. }) => {
+                self.sidebar_state.toggle_other_collapsed();
             }
-            Some(SidebarItem::BookmarkEntry { slot }) => {
-                // Jump to bookmarked target
-                self.jump_to_bookmark(*slot)?;
+            Some(SidebarItem::ProjectHeader { project_key, .. }) => {
+                self.sidebar_state.toggle_project(project_key);
             }
-            Some(SidebarItem::BookmarkHeader | SidebarItem::BookmarkSeparator) | None => {}
+            Some(SidebarItem::AddWorkspace) => {
+                self.open_workspace_modal();
+            }
+            Some(SidebarItem::WorkspaceSectionHeader) | None => {}
         }
 
         Ok(())
@@ -132,7 +152,23 @@ impl App {
             Some(SidebarItem::GroupHeader { key, .. }) => Some(key.clone()),
             Some(SidebarItem::Conversation { group_key, .. }) => Some(group_key.clone()),
             Some(SidebarItem::EphemeralSession { group_key, .. }) => Some(group_key.clone()),
-            Some(SidebarItem::ShowMoreConversations { group_key, .. }) => Some(group_key.clone()),
+            Some(SidebarItem::SectionControl {
+                key,
+                kind: crate::ui::sidebar::SectionKind::Conversations,
+                ..
+            }) => Some(key.clone()),
+            Some(SidebarItem::ProjectHeader { project_key, .. }) => {
+                // Find the first group whose project_path matches this project_key
+                self.groups
+                    .iter()
+                    .find(|g| {
+                        g.project_path()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .as_deref()
+                            == Some(project_key.as_str())
+                    })
+                    .map(ConversationGroup::key)
+            }
             _ => None,
         };
 
@@ -749,11 +785,11 @@ impl App {
             }
             Some(
                 SidebarItem::GroupHeader { .. }
-                | SidebarItem::ShowMoreProjects { .. }
-                | SidebarItem::ShowMoreConversations { .. }
-                | SidebarItem::BookmarkHeader
-                | SidebarItem::BookmarkEntry { .. }
-                | SidebarItem::BookmarkSeparator,
+                | SidebarItem::OtherHeader { .. }
+                | SidebarItem::SectionControl { .. }
+                | SidebarItem::ProjectHeader { .. }
+                | SidebarItem::WorkspaceSectionHeader
+                | SidebarItem::AddWorkspace,
             )
             | None => {
                 // No-op for non-session items

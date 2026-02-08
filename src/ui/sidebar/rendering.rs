@@ -1,6 +1,6 @@
 //! Sidebar widget rendering: the `Sidebar` struct and its `StatefulWidget` implementation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::{
     buffer::Buffer,
@@ -11,15 +11,13 @@ use ratatui::{
 };
 
 use crate::claude::conversation::ConversationStatus;
+use crate::claude::grouping::ConversationGroup;
 
 use super::items::{
     conv_matches_filter, group_has_active_content, is_hidden_plan_implementation,
     should_show_conversation,
 };
-use super::{
-    ArchiveFilter, SidebarContext, SidebarState, DEFAULT_VISIBLE_CONVERSATIONS,
-    DEFAULT_VISIBLE_PROJECTS,
-};
+use super::{ArchiveFilter, ControlAction, SectionKind, SidebarContext, SidebarState, PAGE_SIZE};
 
 /// Sidebar widget for displaying conversations.
 pub struct Sidebar<'a> {
@@ -95,9 +93,11 @@ impl<'a> StatefulWidget for Sidebar<'a> {
         let items = build_list_items(
             self.ctx,
             &state.collapsed_groups,
-            state.show_all_projects,
-            &state.expanded_conversations,
+            &state.collapsed_projects,
+            &state.visible_conversations,
+            &state.visible_groups,
             selected_index,
+            state.other_collapsed,
         );
         let list = List::new(items)
             .highlight_style(
@@ -159,12 +159,15 @@ fn render_filter_row(area: Rect, buf: &mut Buffer, query: &str, active: bool, cu
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_list_items(
     ctx: &SidebarContext,
     collapsed: &HashSet<String>,
-    show_all_projects: bool,
-    expanded_conversations: &HashSet<String>,
+    collapsed_projects: &HashSet<String>,
+    visible_conversations: &HashMap<String, usize>,
+    visible_groups: &HashMap<String, usize>,
     selected_index: Option<usize>,
+    other_collapsed: bool,
 ) -> Vec<ListItem<'static>> {
     let mut items = Vec::new();
     let mut current_index: usize = 0;
@@ -173,274 +176,565 @@ fn build_list_items(
     let filter_lower = ctx.filter_query.to_lowercase();
     let has_text_filter = !filter_lower.is_empty();
 
-    // Render bookmarks section at the top
-    let bookmarks = ctx.bookmark_manager.get_all();
-    if !bookmarks.is_empty() {
-        // Bookmark section header
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                "Bookmarks",
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .fg(Color::Cyan),
-            ),
-            Span::styled(" [b:edit]", Style::default().fg(Color::DarkGray)),
-        ])));
-        current_index += 1;
+    let has_workspaces = !ctx.workspaces.is_empty();
 
-        // Individual bookmarks
-        for bookmark in bookmarks {
-            let slot = bookmark.slot;
-            let name = truncate_string(&bookmark.name, 20);
+    let is_in_workspace = |group: &ConversationGroup| -> bool {
+        if let Some(path) = group.project_path() {
+            let path_str = path.to_string_lossy();
+            ctx.workspaces
+                .iter()
+                .any(|ws| path_str.starts_with(ws.as_str()))
+        } else {
+            false
+        }
+    };
+
+    // WorkspaceSectionHeader always at top
+    let line_num = format_relative_line_number(current_index, selected_index);
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(line_num, Style::default().fg(Color::DarkGray)),
+        Span::styled("Workspaces", Style::default().add_modifier(Modifier::BOLD)),
+    ])));
+    current_index += 1;
+
+    if has_workspaces {
+        // Partition ALL groups first so workspace groups are never truncated
+        let (workspace_groups, all_other_groups): (Vec<_>, Vec<_>) =
+            ctx.groups.iter().partition(|g| is_in_workspace(g));
+
+        // Group workspace groups by project
+        let workspace_projects = group_by_project(&workspace_groups);
+
+        for (project_key, project_name, groups) in &workspace_projects {
+            let is_project_collapsed = collapsed_projects.contains(project_key);
+            render_project_header(
+                &mut items,
+                &mut current_index,
+                project_name,
+                is_project_collapsed,
+                selected_index,
+                " ",
+            );
+
+            if !is_project_collapsed {
+                render_groups_list_with_limit(
+                    &mut items,
+                    &mut current_index,
+                    project_key,
+                    groups,
+                    ctx,
+                    collapsed,
+                    visible_conversations,
+                    visible_groups,
+                    selected_index,
+                    &filter_lower,
+                    has_text_filter,
+                    2,
+                );
+            }
+        }
+
+        // AddWorkspace after workspace projects
+        if !has_text_filter {
+            render_add_workspace(&mut items, &mut current_index, selected_index, " ");
+        }
+
+        // Render "Other" section if there are non-workspace groups
+        if !all_other_groups.is_empty() {
+            let other_projects = group_by_project(&all_other_groups);
+            let total_group_count: usize = other_projects.iter().map(|(_, _, g)| g.len()).sum();
+
+            let arrow = if other_collapsed {
+                "\u{25b8}"
+            } else {
+                "\u{25be}"
+            };
+            let header = format!("{} Other ({} projects)", arrow, total_group_count);
             let line_num = format_relative_line_number(current_index, selected_index);
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(line_num, Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
                 Span::styled(
-                    format!("[{}] ", slot),
+                    header,
                     Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                        .add_modifier(Modifier::BOLD)
+                        .fg(Color::DarkGray),
                 ),
-                Span::raw(name),
             ])));
             current_index += 1;
+
+            if !other_collapsed {
+                for (project_key, project_name, groups) in &other_projects {
+                    let is_project_collapsed = collapsed_projects.contains(project_key);
+                    render_project_header(
+                        &mut items,
+                        &mut current_index,
+                        project_name,
+                        is_project_collapsed,
+                        selected_index,
+                        " ",
+                    );
+
+                    if !is_project_collapsed {
+                        render_groups_list_with_limit(
+                            &mut items,
+                            &mut current_index,
+                            project_key,
+                            groups,
+                            ctx,
+                            collapsed,
+                            visible_conversations,
+                            visible_groups,
+                            selected_index,
+                            &filter_lower,
+                            has_text_filter,
+                            2,
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        // No workspaces configured: AddWorkspace, then flat projects
+        if !has_text_filter {
+            render_add_workspace(&mut items, &mut current_index, selected_index, " ");
         }
 
-        // Separator between bookmarks and conversations
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("─".repeat(20), Style::default().fg(Color::DarkGray)),
-        ])));
-        current_index += 1;
+        // Group all groups by project
+        let all_groups_refs: Vec<&ConversationGroup> = ctx.groups.iter().collect();
+        let projects = group_by_project(&all_groups_refs);
+
+        for (project_key, project_name, groups) in &projects {
+            let is_project_collapsed = collapsed_projects.contains(project_key);
+            render_project_header(
+                &mut items,
+                &mut current_index,
+                project_name,
+                is_project_collapsed,
+                selected_index,
+                "",
+            );
+
+            if !is_project_collapsed {
+                render_groups_list_with_limit(
+                    &mut items,
+                    &mut current_index,
+                    project_key,
+                    groups,
+                    ctx,
+                    collapsed,
+                    visible_conversations,
+                    visible_groups,
+                    selected_index,
+                    &filter_lower,
+                    has_text_filter,
+                    1,
+                );
+            }
+        }
     }
 
-    let visible_groups = if show_all_projects || ctx.groups.len() <= DEFAULT_VISIBLE_PROJECTS {
-        ctx.groups
+    items
+}
+
+/// Render a ProjectHeader item (bold cyan with collapse arrow).
+fn render_project_header(
+    items: &mut Vec<ListItem<'static>>,
+    current_index: &mut usize,
+    name: &str,
+    is_collapsed: bool,
+    selected_index: Option<usize>,
+    indent: &str,
+) {
+    let arrow = if is_collapsed { "\u{25b8}" } else { "\u{25be}" };
+    let header = format!("{}{} {}", indent, arrow, name);
+    let line_num = format_relative_line_number(*current_index, selected_index);
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(line_num, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            header,
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Cyan),
+        ),
+    ])));
+    *current_index += 1;
+}
+
+/// Render an AddWorkspace item (dim "+ Add workspace").
+fn render_add_workspace(
+    items: &mut Vec<ListItem<'static>>,
+    current_index: &mut usize,
+    selected_index: Option<usize>,
+    indent: &str,
+) {
+    let line_num = format_relative_line_number(*current_index, selected_index);
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(line_num, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}+ Add workspace", indent),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])));
+    *current_index += 1;
+}
+
+/// Group a list of `ConversationGroup` references by their `project_key()`.
+/// Returns `Vec<(project_key, project_display_name, Vec<&ConversationGroup>)>` preserving
+/// the order of first appearance.
+fn group_by_project<'a>(
+    groups: &[&'a ConversationGroup],
+) -> Vec<(String, String, Vec<&'a ConversationGroup>)> {
+    let mut result: Vec<(String, String, Vec<&'a ConversationGroup>)> = Vec::new();
+
+    for group in groups {
+        let key = group.project_key();
+        if let Some(entry) = result.iter_mut().find(|(k, _, _)| *k == key) {
+            entry.2.push(group);
+        } else {
+            result.push((key, group.project_display_name(), vec![group]));
+        }
+    }
+
+    result
+}
+
+/// Render groups within a project, applying the visible_groups limit.
+#[allow(clippy::too_many_arguments)]
+fn render_groups_list_with_limit(
+    items: &mut Vec<ListItem<'static>>,
+    current_index: &mut usize,
+    project_key: &str,
+    groups: &[&ConversationGroup],
+    ctx: &SidebarContext,
+    collapsed: &HashSet<String>,
+    visible_conversations: &HashMap<String, usize>,
+    visible_groups: &HashMap<String, usize>,
+    selected_index: Option<usize>,
+    filter_lower: &str,
+    has_text_filter: bool,
+    indent_offset: usize,
+) {
+    let total = groups.len();
+    let vis = if has_text_filter {
+        total
     } else {
-        &ctx.groups[..DEFAULT_VISIBLE_PROJECTS]
+        SidebarState::visible_count(visible_groups, project_key).min(total)
     };
 
-    for group in visible_groups {
-        // Check if a non-plan-impl conversation in this group has a running PTY (parent)
-        let group_has_running_parent = group
-            .conversations()
-            .iter()
-            .any(|c| !c.is_plan_implementation && ctx.running_sessions.contains(&c.session_id));
+    for group in &groups[..vis] {
+        render_group_list_items(
+            items,
+            current_index,
+            group,
+            &group.group_label(),
+            ctx,
+            collapsed,
+            visible_conversations,
+            selected_index,
+            filter_lower,
+            has_text_filter,
+            indent_offset,
+        );
+    }
 
-        // Skip groups with no active content when hide_inactive is enabled
-        if ctx.hide_inactive
-            && !group_has_active_content(group, ctx.running_sessions, ctx.ephemeral_sessions)
-        {
-            continue;
+    // Emit section controls for groups (only when not filtering)
+    if !has_text_filter {
+        let hidden = total.saturating_sub(vis);
+        let is_expanded = visible_groups.contains_key(project_key);
+        let indent = " ".repeat(indent_offset);
+
+        if hidden > 0 {
+            render_section_control(
+                items,
+                current_index,
+                selected_index,
+                &indent,
+                &ControlAction::ShowMore(hidden),
+                SectionKind::Groups,
+            );
+            render_section_control(
+                items,
+                current_index,
+                selected_index,
+                &indent,
+                &ControlAction::ShowAll(total),
+                SectionKind::Groups,
+            );
+        }
+        if is_expanded {
+            render_section_control(
+                items,
+                current_index,
+                selected_index,
+                &indent,
+                &ControlAction::ShowFewer,
+                SectionKind::Groups,
+            );
+            render_section_control(
+                items,
+                current_index,
+                selected_index,
+                &indent,
+                &ControlAction::Collapse,
+                SectionKind::Groups,
+            );
+        }
+    }
+}
+
+/// Render list items for a single group (header + ephemeral sessions + conversations + SectionControls).
+#[allow(clippy::too_many_arguments)]
+fn render_group_list_items(
+    items: &mut Vec<ListItem<'static>>,
+    current_index: &mut usize,
+    group: &ConversationGroup,
+    name: &str,
+    ctx: &SidebarContext,
+    collapsed: &HashSet<String>,
+    visible_conversations: &HashMap<String, usize>,
+    selected_index: Option<usize>,
+    filter_lower: &str,
+    has_text_filter: bool,
+    indent_offset: usize,
+) {
+    // Check if a non-plan-impl conversation in this group has a running PTY (parent)
+    let group_has_running_parent = group
+        .conversations()
+        .iter()
+        .any(|c| !c.is_plan_implementation && ctx.running_sessions.contains(&c.session_id));
+
+    // Skip groups with no active content when hide_inactive is enabled
+    if ctx.hide_inactive
+        && !group_has_active_content(group, ctx.running_sessions, ctx.ephemeral_sessions)
+    {
+        return;
+    }
+
+    // When text filter is active, check if group name matches or any conversation matches
+    let group_name_matches =
+        has_text_filter && group.display_name().to_lowercase().contains(filter_lower);
+
+    // Check if group has any conversations visible with current archive + text filter
+    let has_visible_convs = group.conversations().iter().any(|conv| {
+        !is_hidden_plan_implementation(conv, ctx.running_sessions, group_has_running_parent)
+            && should_show_conversation(
+                conv,
+                ctx.archive_filter,
+                ctx.running_sessions,
+                ctx.hide_inactive,
+            )
+            && (!has_text_filter || group_name_matches || conv_matches_filter(conv, filter_lower))
+    });
+
+    // Skip groups with no visible conversations (unless showing all and no text filter)
+    if !has_visible_convs && (ctx.archive_filter != ArchiveFilter::All || has_text_filter) {
+        return;
+    }
+
+    let group_key = group.key();
+    let is_collapsed = collapsed.contains(&group_key);
+
+    // Build indent strings
+    let group_indent = " ".repeat(indent_offset);
+    let conv_indent = " ".repeat(indent_offset + 2);
+
+    // Group header with "+" indicator for new chat
+    let arrow = if is_collapsed { "\u{25b8}" } else { "\u{25be}" };
+    let header = format!("{}{} {}", group_indent, arrow, name);
+    let line_num = format_relative_line_number(*current_index, selected_index);
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(line_num, Style::default().fg(Color::DarkGray)),
+        Span::styled(header, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" +", Style::default().fg(Color::Green)),
+    ])));
+    *current_index += 1;
+
+    // Conversations and ephemeral sessions (if not collapsed)
+    if !is_collapsed {
+        // First, show ephemeral sessions for this group at the top
+        let group_project_path = group.project_path();
+        if let Some(project_path) = group_project_path {
+            for (session_id, ephemeral) in ctx.ephemeral_sessions {
+                if ephemeral.project_path == project_path {
+                    // Render ephemeral session with distinctive styling
+                    let line_num = format_relative_line_number(*current_index, selected_index);
+                    items.push(ListItem::new(Line::from(vec![
+                        Span::styled(line_num, Style::default().fg(Color::DarkGray)),
+                        Span::raw(conv_indent.clone()),
+                        Span::styled("\u{25d0} ", Style::default().fg(Color::Yellow)),
+                        Span::styled(
+                            format!(
+                                "New conversation ({})",
+                                &session_id[session_id.len().saturating_sub(1)..]
+                            ),
+                            Style::default().add_modifier(Modifier::ITALIC),
+                        ),
+                    ])));
+                    *current_index += 1;
+                }
+            }
         }
 
-        // When text filter is active, check if group name matches or any conversation matches
-        let group_name_matches =
-            has_text_filter && group.display_name().to_lowercase().contains(&filter_lower);
-
-        // Check if group has any conversations visible with current archive + text filter
-        let has_visible_conversations = group.conversations().iter().any(|conv| {
-            !is_hidden_plan_implementation(conv, ctx.running_sessions, group_has_running_parent)
-                && should_show_conversation(
+        // Get all conversations, hiding plan impls only when parent is orchestrating
+        // Also filter by archive status, inactive, and text filter
+        let conversations = group.conversations();
+        let filtered_convos: Vec<_> = conversations
+            .iter()
+            .filter(|conv| {
+                !is_hidden_plan_implementation(conv, ctx.running_sessions, group_has_running_parent)
+            })
+            .filter(|conv| {
+                should_show_conversation(
                     conv,
                     ctx.archive_filter,
                     ctx.running_sessions,
                     ctx.hide_inactive,
                 )
-                && (!has_text_filter
-                    || group_name_matches
-                    || conv_matches_filter(conv, &filter_lower))
-        });
+            })
+            .filter(|conv| {
+                !has_text_filter || group_name_matches || conv_matches_filter(conv, filter_lower)
+            })
+            .collect();
 
-        // Skip groups with no visible conversations (unless showing all and no text filter)
-        if !has_visible_conversations
-            && (ctx.archive_filter != ArchiveFilter::All || has_text_filter)
-        {
-            continue;
-        }
-
-        let group_key = group.key();
-        let is_collapsed = collapsed.contains(&group_key);
-
-        // Check if this group is bookmarked
-        let bookmark_slot = ctx.bookmark_manager.is_group_bookmarked(&group_key);
-        let star_indicator = if let Some(slot) = bookmark_slot {
-            Span::styled(format!(" [{}]", slot), Style::default().fg(Color::Yellow))
+        // Determine how many conversations to show (from filtered list)
+        let total = filtered_convos.len();
+        let vis = if has_text_filter {
+            total
         } else {
-            Span::raw("")
+            SidebarState::visible_count(visible_conversations, &group_key).min(total)
         };
 
-        // Group header with "+" indicator for new chat
-        let arrow = if is_collapsed { "▸" } else { "▾" };
-        let header = format!("{} {}", arrow, group.display_name());
-        let line_num = format_relative_line_number(current_index, selected_index);
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(line_num, Style::default().fg(Color::DarkGray)),
-            Span::styled(header, Style::default().add_modifier(Modifier::BOLD)),
-            star_indicator,
-            Span::styled(" +", Style::default().fg(Color::Green)),
-        ])));
-        current_index += 1;
-
-        // Conversations and ephemeral sessions (if not collapsed)
-        if !is_collapsed {
-            // First, show ephemeral sessions for this group at the top
-            let group_project_path = group.project_path();
-            if let Some(project_path) = group_project_path {
-                for (session_id, ephemeral) in ctx.ephemeral_sessions {
-                    if ephemeral.project_path == project_path {
-                        // Render ephemeral session with distinctive styling
-                        let line_num = format_relative_line_number(current_index, selected_index);
-                        items.push(ListItem::new(Line::from(vec![
-                            Span::styled(line_num, Style::default().fg(Color::DarkGray)),
-                            Span::raw("  "),
-                            Span::styled("◐ ", Style::default().fg(Color::Yellow)),
-                            Span::styled(
-                                format!(
-                                    "New conversation ({})",
-                                    &session_id[session_id.len().saturating_sub(1)..]
-                                ),
-                                Style::default().add_modifier(Modifier::ITALIC),
-                            ),
-                        ])));
-                        current_index += 1;
+        // Then show saved conversations (limited or all)
+        for conv in filtered_convos.iter().take(vis) {
+            // If session is running in background, show it as Active
+            // regardless of the file-based status
+            let is_running = ctx.running_sessions.contains(&conv.session_id);
+            let (status_indicator, archive_indicator) = if is_running {
+                // Use live-polled conv.status for running sessions
+                let indicator = match conv.status {
+                    ConversationStatus::Active => {
+                        Span::styled("\u{25cf} ", Style::default().fg(Color::Green))
                     }
-                }
-            }
-
-            // Get all conversations, hiding plan impls only when parent is orchestrating
-            // Also filter by archive status, inactive, and text filter
-            let conversations = group.conversations();
-            let filtered_convos: Vec<_> = conversations
-                .iter()
-                .filter(|conv| {
-                    !is_hidden_plan_implementation(
-                        conv,
-                        ctx.running_sessions,
-                        group_has_running_parent,
-                    )
-                })
-                .filter(|conv| {
-                    should_show_conversation(
-                        conv,
-                        ctx.archive_filter,
-                        ctx.running_sessions,
-                        ctx.hide_inactive,
-                    )
-                })
-                .filter(|conv| {
-                    !has_text_filter
-                        || group_name_matches
-                        || conv_matches_filter(conv, &filter_lower)
-                })
-                .collect();
-
-            // Determine how many conversations to show (from filtered list)
-            let is_expanded = expanded_conversations.contains(&group_key);
-            let visible_convos: Vec<_> =
-                if is_expanded || filtered_convos.len() <= DEFAULT_VISIBLE_CONVERSATIONS {
-                    filtered_convos.clone()
-                } else {
-                    filtered_convos
-                        .iter()
-                        .take(DEFAULT_VISIBLE_CONVERSATIONS)
-                        .copied()
-                        .collect()
+                    ConversationStatus::WaitingForInput | ConversationStatus::Idle => {
+                        Span::styled("\u{25d0} ", Style::default().fg(Color::Yellow))
+                    }
                 };
-
-            // Then show saved conversations (limited or all)
-            for conv in &visible_convos {
-                // If session is running in background, show it as Active
-                // regardless of the file-based status
-                let is_running = ctx.running_sessions.contains(&conv.session_id);
-                let (status_indicator, archive_indicator) = if is_running {
-                    // Use live-polled conv.status for running sessions
-                    let indicator = match conv.status {
-                        ConversationStatus::Active => {
-                            Span::styled("● ", Style::default().fg(Color::Green))
-                        }
-                        ConversationStatus::WaitingForInput | ConversationStatus::Idle => {
-                            Span::styled("◐ ", Style::default().fg(Color::Yellow))
-                        }
-                    };
-                    (indicator, None)
+                (indicator, None)
+            } else {
+                // Not running -- always show as idle regardless of JSONL state
+                let status = Span::styled("\u{25cb} ", Style::default().fg(Color::DarkGray));
+                // Show archive indicator when in "All" view
+                let archive = if ctx.archive_filter == ArchiveFilter::All && conv.is_archived {
+                    Some(Span::styled(
+                        "\u{1f4e6} ",
+                        Style::default().fg(Color::DarkGray),
+                    ))
                 } else {
-                    // Not running -- always show as idle regardless of JSONL state
-                    let status = Span::styled("○ ", Style::default().fg(Color::DarkGray));
-                    // Show archive indicator when in "All" view
-                    let archive = if ctx.archive_filter == ArchiveFilter::All && conv.is_archived {
-                        Some(Span::styled("📦 ", Style::default().fg(Color::DarkGray)))
-                    } else {
-                        None
-                    };
-                    (status, archive)
+                    None
                 };
+                (status, archive)
+            };
 
-                let display = truncate_string(&conv.display, 30);
-                let line_num = format_relative_line_number(current_index, selected_index);
-                let mut line_parts = vec![
-                    Span::styled(line_num, Style::default().fg(Color::DarkGray)),
-                    Span::raw("  "),
-                ];
-
-                // Add archive indicator if present (only in All view)
-                if let Some(indicator) = archive_indicator {
-                    line_parts.push(indicator);
-                }
-
-                line_parts.push(status_indicator);
-                line_parts.push(Span::raw(display));
-
-                items.push(ListItem::new(Line::from(line_parts)));
-                current_index += 1;
-            }
-
-            // Add "show more conversations" if truncated (use filtered count)
-            if !is_expanded && filtered_convos.len() > DEFAULT_VISIBLE_CONVERSATIONS {
-                let hidden = filtered_convos.len() - DEFAULT_VISIBLE_CONVERSATIONS;
-                let line_num = format_relative_line_number(current_index, selected_index);
-                items.push(ListItem::new(Line::from(vec![
-                    Span::styled(line_num, Style::default().fg(Color::DarkGray)),
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("↓ Show {} more...", hidden),
-                        Style::default().fg(Color::Blue),
-                    ),
-                ])));
-                current_index += 1;
-            }
-        }
-    }
-
-    // Add "Show more" at end if truncated
-    if !show_all_projects && ctx.groups.len() > DEFAULT_VISIBLE_PROJECTS {
-        // When hide_inactive is enabled, count only hidden groups with active content
-        let hidden_groups = &ctx.groups[DEFAULT_VISIBLE_PROJECTS..];
-        let hidden = if ctx.hide_inactive {
-            hidden_groups
-                .iter()
-                .filter(|g| {
-                    group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions)
-                })
-                .count()
-        } else {
-            hidden_groups.len()
-        };
-        if hidden > 0 {
-            let line_num = format_relative_line_number(current_index, selected_index);
-            items.push(ListItem::new(Line::from(vec![
+            let display = truncate_string(&conv.display, 30);
+            let line_num = format_relative_line_number(*current_index, selected_index);
+            let mut line_parts = vec![
                 Span::styled(line_num, Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("↓ Show {} more projects...", hidden),
-                    Style::default().fg(Color::Blue),
-                ),
-            ])));
+                Span::raw(conv_indent.clone()),
+            ];
+
+            // Add archive indicator if present (only in All view)
+            if let Some(indicator) = archive_indicator {
+                line_parts.push(indicator);
+            }
+
+            line_parts.push(status_indicator);
+            line_parts.push(Span::raw(display));
+
+            items.push(ListItem::new(Line::from(line_parts)));
+            *current_index += 1;
+        }
+
+        // Emit section controls for conversations (only when not filtering)
+        if !has_text_filter {
+            let hidden = total.saturating_sub(vis);
+            let is_expanded = visible_conversations.contains_key(&group_key);
+
+            if hidden > 0 {
+                render_section_control(
+                    items,
+                    current_index,
+                    selected_index,
+                    &conv_indent,
+                    &ControlAction::ShowMore(hidden),
+                    SectionKind::Conversations,
+                );
+                render_section_control(
+                    items,
+                    current_index,
+                    selected_index,
+                    &conv_indent,
+                    &ControlAction::ShowAll(total),
+                    SectionKind::Conversations,
+                );
+            }
+            if is_expanded {
+                render_section_control(
+                    items,
+                    current_index,
+                    selected_index,
+                    &conv_indent,
+                    &ControlAction::ShowFewer,
+                    SectionKind::Conversations,
+                );
+                render_section_control(
+                    items,
+                    current_index,
+                    selected_index,
+                    &conv_indent,
+                    &ControlAction::Collapse,
+                    SectionKind::Conversations,
+                );
+            }
         }
     }
+}
 
-    items
+/// Render a single section control item (Show more/all/fewer/Collapse).
+fn render_section_control(
+    items: &mut Vec<ListItem<'static>>,
+    current_index: &mut usize,
+    selected_index: Option<usize>,
+    indent: &str,
+    action: &ControlAction,
+    kind: SectionKind,
+) {
+    let kind_label = match kind {
+        SectionKind::Conversations => "",
+        SectionKind::Groups => " groups",
+    };
+    let label = match action {
+        ControlAction::ShowMore(hidden) => {
+            format!(
+                "{}\u{25bc} Show {} more{}  ({} hidden)",
+                indent, PAGE_SIZE, kind_label, hidden
+            )
+        }
+        ControlAction::ShowAll(total) => {
+            format!("{}\u{25bc} Show all{} ({})", indent, kind_label, total)
+        }
+        ControlAction::ShowFewer => {
+            format!("{}\u{25b2} Show {} fewer{}", indent, PAGE_SIZE, kind_label)
+        }
+        ControlAction::Collapse => {
+            format!("{}\u{25b2} Collapse{}", indent, kind_label)
+        }
+    };
+    let line_num = format_relative_line_number(*current_index, selected_index);
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(line_num, Style::default().fg(Color::DarkGray)),
+        Span::styled(label, Style::default().fg(Color::Blue)),
+    ])));
+    *current_index += 1;
 }
 
 /// Format a relative line number for display.
@@ -459,6 +753,10 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let mut end = max_len.saturating_sub(3);
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     }
 }

@@ -1,4 +1,4 @@
-//! User-facing actions on App (archive, bookmark, clipboard, modals, search, etc.).
+//! User-facing actions on App (archive, clipboard, modals, search, etc.).
 
 use std::path::Path;
 
@@ -199,149 +199,6 @@ impl App {
                 eprintln!("Failed to save auto-archive state: {}", e);
             }
         }
-    }
-
-    // =========================================================================
-    // Bookmark Methods
-    // =========================================================================
-
-    /// Jump to a bookmark by slot (1-9)
-    /// Returns true if successful, false if bookmark doesn't exist or target not found
-    pub fn jump_to_bookmark(&mut self, slot: u8) -> Result<bool> {
-        let bookmark = match self.bookmark_manager.get(slot) {
-            Some(b) => b.clone(),
-            None => {
-                self.toast_error(format!("No bookmark at slot {}", slot));
-                return Ok(false);
-            }
-        };
-
-        match &bookmark.target {
-            BookmarkTarget::Project { group_key, .. } => {
-                self.jump_to_group(group_key, &bookmark.name)
-            }
-            BookmarkTarget::Conversation {
-                session_id,
-                group_key,
-                ..
-            } => self.jump_to_conversation(group_key, session_id, &bookmark.name),
-        }
-    }
-
-    /// Bookmark the currently selected item to the given slot
-    /// Returns true if successful
-    pub fn bookmark_current(&mut self, slot: u8) -> Result<bool> {
-        if !(1..=9).contains(&slot) {
-            self.toast_error("Bookmark slot must be 1-9");
-            return Ok(false);
-        }
-
-        let items = self.sidebar_items();
-        let selected = self.sidebar_state.list_state.selected().unwrap_or(0);
-
-        let bookmark = match items.get(selected) {
-            Some(SidebarItem::GroupHeader { key, .. }) => {
-                // Bookmark the group/project
-                self.create_group_bookmark(slot, key)
-            }
-            Some(SidebarItem::Conversation { group_key, index }) => {
-                // Bookmark the specific conversation
-                self.create_conversation_bookmark(slot, group_key, *index)
-            }
-            Some(SidebarItem::EphemeralSession {
-                session_id: _,
-                group_key: _,
-            }) => {
-                // Can't bookmark ephemeral sessions (they don't have stable IDs)
-                self.toast_warning("Cannot bookmark new conversations until they're saved");
-                return Ok(false);
-            }
-            _ => {
-                self.toast_warning("Cannot bookmark this item");
-                return Ok(false);
-            }
-        };
-
-        if let Some(bookmark) = bookmark {
-            let name = bookmark.name.clone();
-            let replaced = self.bookmark_manager.has_slot(slot);
-            self.bookmark_manager.set(bookmark)?;
-
-            if replaced {
-                self.toast_success(format!("Replaced bookmark {} with '{}'", slot, name));
-            } else {
-                self.toast_success(format!("Bookmarked '{}' to slot {}", name, slot));
-            }
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Create a bookmark for a group
-    fn create_group_bookmark(&self, slot: u8, group_key: &str) -> Option<Bookmark> {
-        for group in &self.groups {
-            if group.key() == group_key {
-                let project_path = group.project_path()?;
-                let name = group.display_name();
-
-                return Some(Bookmark::new_project(
-                    slot,
-                    name,
-                    project_path,
-                    group_key.to_string(),
-                ));
-            }
-        }
-        None
-    }
-
-    /// Create a bookmark for a conversation
-    fn create_conversation_bookmark(
-        &self,
-        slot: u8,
-        group_key: &str,
-        index: usize,
-    ) -> Option<Bookmark> {
-        for group in &self.groups {
-            if group.key() == group_key {
-                if let Some(conv) = group.conversations().get(index) {
-                    let name = conv
-                        .summary
-                        .clone()
-                        .unwrap_or_else(|| conv.display.clone())
-                        .chars()
-                        .take(30)
-                        .collect();
-
-                    return Some(Bookmark::new_conversation(
-                        slot,
-                        name,
-                        conv.session_id.clone(),
-                        conv.project_path.clone(),
-                        group_key.to_string(),
-                    ));
-                }
-            }
-        }
-        None
-    }
-
-    /// Remove a bookmark from the given slot
-    /// Returns true if a bookmark was removed
-    pub fn remove_bookmark(&mut self, slot: u8) -> Result<bool> {
-        if !(1..=9).contains(&slot) {
-            self.toast_error("Bookmark slot must be 1-9");
-            return Ok(false);
-        }
-
-        let removed = self.bookmark_manager.remove(slot)?;
-        if removed {
-            self.toast_success(format!("Removed bookmark from slot {}", slot));
-        } else {
-            self.toast_warning(format!("No bookmark at slot {}", slot));
-        }
-        Ok(removed)
     }
 
     // =========================================================================
@@ -562,12 +419,24 @@ impl App {
         // Ensure the conversation is visible in the sidebar:
         // 1. Uncollapse the group
         self.sidebar_state.collapsed_groups.remove(&group_key);
-        // 2. Expand conversation list so it's not truncated
-        self.sidebar_state
-            .expanded_conversations
-            .insert(group_key.clone());
-        // 3. Show all projects in case this group is beyond the visible limit
-        self.sidebar_state.show_all_projects = true;
+        // 2. Expand conversation list to show all so this conversation is visible
+        let conv_total = self
+            .groups
+            .iter()
+            .find(|g| g.key() == group_key)
+            .map(|g| g.conversations().len())
+            .unwrap_or(0);
+        SidebarState::show_all(
+            &mut self.sidebar_state.visible_conversations,
+            &group_key,
+            conv_total,
+        );
+        // 3. For every project, ensure all groups are visible so this group isn't hidden
+        for group in &self.groups {
+            let pk = group.project_key();
+            let group_total = self.groups.iter().filter(|g| g.project_key() == pk).count();
+            SidebarState::show_all(&mut self.sidebar_state.visible_groups, &pk, group_total);
+        }
 
         // Best-effort: select the conversation in the sidebar
         let items = self.sidebar_items();
@@ -793,6 +662,71 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    // =========================================================================
+    // Workspace Methods
+    // =========================================================================
+
+    /// Open the workspace management modal.
+    pub fn open_workspace_modal(&mut self) {
+        let current_workspaces = self.config.workspaces.clone();
+        let state = WorkspaceModalState::new(current_workspaces);
+        self.modal_state = ModalState::Workspace(Box::new(state));
+        self.input_mode = InputMode::Insert;
+    }
+
+    /// Add a workspace directory to config.
+    pub fn add_workspace(&mut self, path: &str) {
+        if self.config.workspaces.contains(&path.to_string()) {
+            self.toast_warning("Already a workspace");
+            return;
+        }
+        self.config.workspaces.push(path.to_string());
+        self.save_config_silent();
+
+        // Update the modal state to reflect the change
+        if let ModalState::Workspace(ref mut state) = self.modal_state {
+            state.workspaces.push(path.to_string());
+            // Update current list selection
+            if !state.workspaces.is_empty() {
+                state
+                    .list_state_current
+                    .select(Some(state.workspaces.len() - 1));
+                state.selected_current = state.workspaces.len() - 1;
+            }
+        }
+
+        self.toast_success(format!("Workspace added: {}", path));
+    }
+
+    /// Remove a workspace directory from config by index.
+    pub fn remove_workspace(&mut self, index: usize) {
+        if index >= self.config.workspaces.len() {
+            return;
+        }
+        let removed = self.config.workspaces.remove(index);
+        self.save_config_silent();
+
+        // Update the modal state to reflect the change
+        if let ModalState::Workspace(ref mut state) = self.modal_state {
+            if index < state.workspaces.len() {
+                state.workspaces.remove(index);
+            }
+            // Clamp current list selection
+            if state.workspaces.is_empty() {
+                state.list_state_current.select(None);
+                state.selected_current = 0;
+                state.focus = crate::ui::modal::workspace::WorkspaceModalFocus::AvailableList;
+            } else {
+                state.selected_current = state.selected_current.min(state.workspaces.len() - 1);
+                state
+                    .list_state_current
+                    .select(Some(state.selected_current));
+            }
+        }
+
+        self.toast_success(format!("Workspace removed: {}", removed));
     }
 
     // =========================================================================

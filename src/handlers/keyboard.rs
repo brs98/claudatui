@@ -256,15 +256,6 @@ pub(crate) fn handle_leader_key(app: &mut App, key: KeyEvent) -> Result<KeyActio
 /// Execute a leader action
 pub(crate) fn execute_leader_action(app: &mut App, action: LeaderAction) -> Result<()> {
     match action {
-        LeaderAction::BookmarkJump(slot) => {
-            app.jump_to_bookmark(slot)?;
-        }
-        LeaderAction::BookmarkSet(slot) => {
-            app.bookmark_current(slot)?;
-        }
-        LeaderAction::BookmarkDelete(slot) => {
-            app.remove_bookmark(slot)?;
-        }
         LeaderAction::SearchOpen => {
             app.open_search_modal();
         }
@@ -300,6 +291,9 @@ pub(crate) fn execute_leader_action(app: &mut App, action: LeaderAction) -> Resu
         }
         LeaderAction::WorktreeSearch => {
             app.open_worktree_search_modal();
+        }
+        LeaderAction::ManageWorkspaces => {
+            app.open_workspace_modal();
         }
     }
     Ok(())
@@ -610,15 +604,19 @@ fn handle_sidebar_enter(app: &mut App) -> Result<()> {
     let selected = app.sidebar_state.list_state.selected().unwrap_or(0);
 
     match items.get(selected) {
-        Some(SidebarItem::GroupHeader { .. }) => {
-            // Toggle expand/collapse on group headers
+        Some(
+            SidebarItem::GroupHeader { .. }
+            | SidebarItem::OtherHeader { .. }
+            | SidebarItem::ProjectHeader { .. },
+        ) => {
+            // Toggle expand/collapse on group/project headers
             app.toggle_current_group();
         }
-        Some(SidebarItem::BookmarkHeader | SidebarItem::BookmarkSeparator) => {
-            // Non-interactive items — no-op
+        Some(SidebarItem::WorkspaceSectionHeader) => {
+            // Non-interactive item — no-op
         }
         _ => {
-            // Open conversation/ephemeral session, bookmark entry, or handle other items
+            // Open conversation/ephemeral session, add workspace, or handle other items
             app.open_selected()?;
         }
     }
