@@ -149,6 +149,12 @@ impl ConversationGroup {
             }
         }
     }
+
+    /// Returns true if the group's project directory still exists on disk.
+    /// Groups with no project path (empty groups) are considered valid.
+    pub fn project_path_exists(&self) -> bool {
+        self.project_path().is_none_or(|p| p.exists())
+    }
 }
 
 /// Read the current branch name from a `.git/HEAD` file.
@@ -255,6 +261,11 @@ enum GroupKey {
     Worktree { repo_path: PathBuf, branch: String },
     Directory { parent: String, project: String },
     Ungrouped { path: PathBuf },
+}
+
+/// Remove groups whose project directory no longer exists on disk.
+pub fn retain_existing_groups(groups: &mut Vec<ConversationGroup>) {
+    groups.retain(ConversationGroup::project_path_exists);
 }
 
 /// Group conversations by their project paths (with full sorting by recency)

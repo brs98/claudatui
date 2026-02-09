@@ -18,7 +18,8 @@ use ratatui::layout::Rect;
 use crate::claude::archive::ArchiveManager;
 use crate::claude::conversation::{detect_status_fast, Conversation, ConversationStatus};
 use crate::claude::grouping::{
-    group_conversations, group_conversations_unordered, order_groups_by_keys, ConversationGroup,
+    group_conversations, group_conversations_unordered, order_groups_by_keys,
+    retain_existing_groups, ConversationGroup,
 };
 use crate::claude::sessions::{parse_all_sessions, SessionEntry};
 use crate::claude::SessionsWatcher;
@@ -313,7 +314,9 @@ impl App {
     pub(crate) fn load_conversations_full(&mut self) -> Result<()> {
         let sessions = parse_all_sessions(&self.claude_dir)?;
         let conversations = self.sessions_to_conversations(sessions);
-        self.groups = group_conversations(conversations);
+        let mut groups = group_conversations(conversations);
+        retain_existing_groups(&mut groups);
+        self.groups = groups;
         self.group_order = self.groups.iter().map(ConversationGroup::key).collect();
         Ok(())
     }
@@ -323,7 +326,8 @@ impl App {
     pub(crate) fn load_conversations_preserve_order(&mut self) -> Result<()> {
         let sessions = parse_all_sessions(&self.claude_dir)?;
         let conversations = self.sessions_to_conversations(sessions);
-        let groups = group_conversations_unordered(conversations);
+        let mut groups = group_conversations_unordered(conversations);
+        retain_existing_groups(&mut groups);
         let (ordered_groups, updated_order) = order_groups_by_keys(groups, &self.group_order);
         self.groups = ordered_groups;
         self.group_order = updated_order;
