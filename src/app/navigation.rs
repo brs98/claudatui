@@ -89,7 +89,9 @@ impl App {
     /// Priority:
     /// 1. Ephemeral sessions (new conversations not yet persisted)
     /// 2. Running conversations (have active PTYs)
-    /// 3. Active/WaitingForInput status conversations
+    ///
+    /// Only trusts live PTY state — does NOT fall back to JSONL-based `conv.status`,
+    /// which can be stale when Claude exits externally.
     ///
     /// Returns the sidebar item index and session info if found.
     fn find_active_session_in_group(&self, group_key: &str) -> Option<ActiveSessionInfo> {
@@ -135,32 +137,6 @@ impl App {
                 continue;
             }
             if running.contains(&conv.session_id) {
-                // Find this conversation's index in the sidebar items
-                let index = items.iter().position(|item| {
-                    matches!(item, SidebarItem::Conversation { group_key: gk, index } if gk == group_key && *index == conv_idx)
-                });
-                if let Some(idx) = index {
-                    return Some(ActiveSessionInfo::Conversation {
-                        index: idx,
-                        session_id: conv.session_id.clone(),
-                        conversation: conv.clone(),
-                    });
-                }
-            }
-        }
-
-        // Second pass: find conversations with Active or WaitingForInput status
-        for (conv_idx, conv) in conversations.iter().enumerate() {
-            if conv.is_plan_implementation
-                && !running.contains(&conv.session_id)
-                && group_has_running_parent
-            {
-                continue;
-            }
-            if matches!(
-                conv.status,
-                ConversationStatus::Active | ConversationStatus::WaitingForInput
-            ) {
                 // Find this conversation's index in the sidebar items
                 let index = items.iter().position(|item| {
                     matches!(item, SidebarItem::Conversation { group_key: gk, index } if gk == group_key && *index == conv_idx)

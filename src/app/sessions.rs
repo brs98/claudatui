@@ -327,6 +327,17 @@ impl App {
         self.session_state_cache.as_ref()
     }
 
+    /// Check if a specific conversation has an active PTY session.
+    ///
+    /// This is the **only reliable** way to determine if a conversation is active.
+    /// Do NOT use `conv.status` (JSONL-based) for activeness guards — it can be
+    /// stale when Claude exits externally without writing a final status entry.
+    pub fn is_conversation_running(&self, session_id: &str) -> bool {
+        self.session_to_claude_id
+            .values()
+            .any(|claude_id| claude_id.as_deref() == Some(session_id))
+    }
+
     /// Get set of running session IDs for sidebar display
     pub fn running_session_ids(&self) -> HashSet<String> {
         // Return Claude session IDs for sessions that are running

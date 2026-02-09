@@ -16,27 +16,25 @@ impl App {
         match items.get(selected) {
             Some(SidebarItem::Conversation { group_key, index }) => {
                 // Find the conversation
-                let mut conv_info: Option<(String, ConversationStatus, bool)> = None;
+                let mut conv_info: Option<(String, bool)> = None;
                 for group in &self.groups {
                     if &group.key() == group_key {
                         if let Some(conv) = group.conversations().get(*index) {
-                            conv_info =
-                                Some((conv.session_id.clone(), conv.status, conv.is_archived));
+                            conv_info = Some((conv.session_id.clone(), conv.is_archived));
                             break;
                         }
                     }
                 }
 
-                if let Some((session_id, status, is_archived)) = conv_info {
+                if let Some((session_id, is_archived)) = conv_info {
                     // Check if already archived
                     if is_archived {
                         self.toast_warning("Already archived");
                         return Ok(false);
                     }
 
-                    // Check if the conversation is running
-                    let is_running = self.running_session_ids().contains(&session_id);
-                    if is_running || status != ConversationStatus::Idle {
+                    // Check if the conversation is running (only trust live PTY, not stale JSONL status)
+                    if self.is_conversation_running(&session_id) {
                         self.toast_warning("Cannot archive active conversation");
                         return Ok(false);
                     }
@@ -163,9 +161,6 @@ impl App {
                     continue;
                 }
                 if self.running_session_ids().contains(&conv.session_id) {
-                    continue;
-                }
-                if conv.status != ConversationStatus::Idle {
                     continue;
                 }
 

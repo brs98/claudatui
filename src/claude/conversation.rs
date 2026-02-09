@@ -32,7 +32,15 @@ pub struct Conversation {
     pub modified: String,
     /// Project path
     pub project_path: PathBuf,
-    /// Current status
+    /// Current status (JSONL-based — can be stale).
+    ///
+    /// **Warning:** This field is derived from the last entry in the conversation's
+    /// JSONL transcript. It can report `Active` or `WaitingForInput` indefinitely
+    /// if Claude exits externally without writing a final status entry.
+    ///
+    /// For activeness guards (archive, navigation, visibility), use
+    /// `App::is_conversation_running()` or `App::running_session_ids()` instead,
+    /// which check live PTY state.
     pub status: ConversationStatus,
     /// Number of messages in the conversation
     pub message_count: u32,
