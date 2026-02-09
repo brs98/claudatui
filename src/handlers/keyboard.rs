@@ -451,6 +451,12 @@ pub(crate) fn flush_buffered_key(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 pub(crate) fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    // Close help menu on any keypress (except '?' which toggles below)
+    if app.help_menu_open && key.code != KeyCode::Char('?') {
+        app.help_menu_open = false;
+        // Fall through to process the key normally
+    }
+
     // Handle chord sequences first
     match &app.chord_state {
         ChordState::DeletePending { .. } => {
@@ -521,8 +527,14 @@ pub(crate) fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<
             };
         }
 
+        // Toggle help menu overlay
+        KeyCode::Char('?') => {
+            app.help_menu_open = !app.help_menu_open;
+        }
+
         // Space enters leader mode (which-key menu)
         KeyCode::Char(' ') => {
+            app.help_menu_open = false;
             app.enter_leader_mode();
         }
 
@@ -572,6 +584,7 @@ pub(crate) fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<
 
         // Enter insert mode and focus terminal
         KeyCode::Char('l') => {
+            app.help_menu_open = false;
             app.enter_insert_mode();
         }
 

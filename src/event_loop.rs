@@ -24,7 +24,7 @@ use crate::ui::modal::{
 use crate::ui::sidebar::{Sidebar, SidebarContext};
 use crate::ui::terminal_pane::TerminalPane;
 use crate::ui::toast_widget::{ToastPosition, ToastWidget};
-use crate::ui::WhichKeyWidget;
+use crate::ui::{HelpMenuWidget, WhichKeyWidget};
 
 /// Action to take after run_app completes
 pub enum HotReloadAction {
@@ -217,6 +217,13 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
         f.render_widget(which_key, which_key_area);
     }
 
+    // Draw help menu overlay when open
+    if app.help_menu_open {
+        let help_area = HelpMenuWidget::calculate_area(f.area());
+        let help_menu = HelpMenuWidget::new();
+        f.render_widget(help_menu, help_area);
+    }
+
     // Draw modal last (highest z-index)
     draw_modal(f, app);
 }
@@ -351,8 +358,8 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             Span::raw("cancel "),
             Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
             Span::raw("keep filter "),
-            Span::styled(" jk ", Style::default().fg(Color::Cyan)),
-            Span::raw("cancel"),
+            Span::styled(" ? ", Style::default().fg(Color::Cyan)),
+            Span::raw("help"),
         ]))
         .style(Style::default().bg(Color::DarkGray));
         f.render_widget(help, area);
@@ -368,35 +375,17 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             if app.sidebar_state.has_filter() {
                 // Persistent filter active — show filter-relevant hints
                 spans.extend(vec![
-                    Span::styled(" f ", Style::default().fg(Color::Cyan)),
-                    Span::raw("edit filter "),
                     Span::styled(" Esc ", Style::default().fg(Color::Cyan)),
                     Span::raw("clear filter "),
-                    Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
-                    Span::raw("nav "),
-                    Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
-                    Span::raw("open "),
-                    Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
-                    Span::raw("quit"),
+                    Span::styled(" ? ", Style::default().fg(Color::Cyan)),
+                    Span::raw("help"),
                 ]);
             } else {
                 spans.extend(vec![
-                    Span::styled(" j/k ", Style::default().fg(Color::Cyan)),
-                    Span::raw("nav "),
-                    Span::styled(" l ", Style::default().fg(Color::Cyan)),
-                    Span::raw("terminal "),
-                    Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
-                    Span::raw("open "),
                     Span::styled(" SPC ", Style::default().fg(Color::Cyan)),
                     Span::raw("leader "),
-                    Span::styled(" / ", Style::default().fg(Color::Cyan)),
-                    Span::raw("search "),
-                    Span::styled(" f ", Style::default().fg(Color::Cyan)),
-                    Span::raw("filter "),
-                    Span::styled(" dd ", Style::default().fg(Color::Cyan)),
-                    Span::raw("close "),
-                    Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
-                    Span::raw("quit"),
+                    Span::styled(" ? ", Style::default().fg(Color::Cyan)),
+                    Span::raw("help"),
                 ]);
             }
             spans
@@ -410,10 +399,8 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             spans.extend(vec![
                 Span::styled(" jk ", Style::default().fg(Color::Cyan)),
                 Span::raw("sidebar "),
-                Span::styled(" C-h ", Style::default().fg(Color::Cyan)),
-                Span::raw("sidebar "),
-                Span::styled(" C-q ", Style::default().fg(Color::Cyan)),
-                Span::raw("quit"),
+                Span::styled(" ? ", Style::default().fg(Color::Cyan)),
+                Span::raw("help"),
             ]);
             spans
         }

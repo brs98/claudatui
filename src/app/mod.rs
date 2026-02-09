@@ -234,6 +234,8 @@ pub struct App {
     /// Used to detect stale Active status: if the file hasn't grown since resume,
     /// Claude hasn't actually started processing yet, so override Active → WaitingForInput.
     resume_jsonl_sizes: HashMap<String, u64>,
+    /// Whether the help menu overlay is open (toggled by '?')
+    pub help_menu_open: bool,
 }
 
 impl App {
@@ -297,6 +299,7 @@ impl App {
             terminal_inner_area: None,
             last_live_status_poll: None,
             resume_jsonl_sizes: HashMap::new(),
+            help_menu_open: false,
         };
 
         app.load_conversations_full()?;
