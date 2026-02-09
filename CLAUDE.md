@@ -72,7 +72,7 @@ Notable state machines:
 
 ## Code Quality
 
-Strict clippy lints are configured in `Cargo.toml` (`[lints.clippy]`). All warnings are treated as errors in CI. Do not modify the version in `Cargo.toml` — releases are handled by maintainers.
+Strict clippy lints are configured in `Cargo.toml` (`[lints.clippy]`). All warnings are treated as errors in CI. When creating a release, bump the version in `Cargo.toml` to match the release tag.
 
 ## Key Patterns
 
