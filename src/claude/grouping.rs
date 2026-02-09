@@ -151,6 +151,38 @@ impl ConversationGroup {
     }
 }
 
+/// Read the current branch name from a `.git/HEAD` file.
+///
+/// Returns the branch name for symbolic refs (e.g., `ref: refs/heads/main` → `"main"`),
+/// or the first 8 hex chars for a detached HEAD (raw SHA).
+/// Returns `None` if the file is unreadable or unparseable.
+fn read_git_head_branch(git_dir: &Path) -> Option<String> {
+    let head_path = git_dir.join("HEAD");
+    let contents = std::fs::read_to_string(head_path).ok()?;
+    let trimmed = contents.trim();
+
+    if let Some(ref_path) = trimmed.strip_prefix("ref: ") {
+        // Symbolic ref: "ref: refs/heads/<branch>"
+        ref_path.strip_prefix("refs/heads/").map(String::from)
+    } else if trimmed.len() >= 8 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Detached HEAD: raw SHA
+        Some(trimmed[..8].to_string())
+    } else {
+        None
+    }
+}
+
+/// Check if a `.git/worktrees/` directory exists and has at least one subdirectory.
+fn has_worktree_subdirs(git_dir: &Path) -> bool {
+    let worktrees_dir = git_dir.join("worktrees");
+    match std::fs::read_dir(worktrees_dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .any(|e| e.file_type().is_ok_and(|ft| ft.is_dir())),
+        Err(_) => false,
+    }
+}
+
 /// Extract group info from a project path
 fn extract_group_key(project_path: &str) -> GroupKey {
     let path_str = project_path;
@@ -189,6 +221,17 @@ fn extract_group_key(project_path: &str) -> GroupKey {
                     };
                 }
             }
+        }
+    }
+
+    // Pattern 2.5: Main checkout of a non-bare repo with worktrees
+    // .git is a directory (not a file), and .git/worktrees/ has subdirectories
+    if dot_git.is_dir() && has_worktree_subdirs(&dot_git) {
+        if let Some(branch) = read_git_head_branch(&dot_git) {
+            return GroupKey::Worktree {
+                repo_path: path.to_path_buf(),
+                branch,
+            };
         }
     }
 
@@ -524,5 +567,222 @@ mod tests {
             .filter(|c| !is_hidden(c, &running, has_parent))
             .collect();
         assert_eq!(filtered.len(), 3); // All visible (plan impl has its own PTY)
+    }
+
+    // --- Helper unit tests ---
+
+    #[test]
+    fn read_git_head_branch_parses_symbolic_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(read_git_head_branch(git_dir), Some("main".to_string()));
+    }
+
+    #[test]
+    fn read_git_head_branch_parses_feature_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/my-branch\n").unwrap();
+        assert_eq!(
+            read_git_head_branch(git_dir),
+            Some("feature/my-branch".to_string())
+        );
+    }
+
+    #[test]
+    fn read_git_head_branch_returns_short_sha_for_detached_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        std::fs::write(
+            git_dir.join("HEAD"),
+            "abc123def456789012345678901234567890abcd\n",
+        )
+        .unwrap();
+        assert_eq!(read_git_head_branch(git_dir), Some("abc123de".to_string()));
+    }
+
+    #[test]
+    fn read_git_head_branch_returns_none_for_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        std::fs::write(git_dir.join("HEAD"), "not a valid HEAD\n").unwrap();
+        assert_eq!(read_git_head_branch(git_dir), None);
+    }
+
+    #[test]
+    fn read_git_head_branch_returns_none_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_git_head_branch(dir.path()), None);
+    }
+
+    #[test]
+    fn has_worktree_subdirs_true_when_subdirs_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        let wt_dir = git_dir.join("worktrees").join("feature-branch");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+        assert!(has_worktree_subdirs(git_dir));
+    }
+
+    #[test]
+    fn has_worktree_subdirs_false_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        std::fs::create_dir_all(git_dir.join("worktrees")).unwrap();
+        assert!(!has_worktree_subdirs(git_dir));
+    }
+
+    #[test]
+    fn has_worktree_subdirs_false_when_only_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path();
+        std::fs::create_dir_all(git_dir.join("worktrees")).unwrap();
+        std::fs::write(git_dir.join("worktrees").join("somefile"), "data").unwrap();
+        assert!(!has_worktree_subdirs(git_dir));
+    }
+
+    #[test]
+    fn has_worktree_subdirs_false_when_no_worktrees_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!has_worktree_subdirs(dir.path()));
+    }
+
+    // --- Pattern 2.5 integration tests ---
+
+    #[test]
+    fn extract_group_key_main_checkout_with_worktrees_returns_worktree_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("myrepo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(git_dir.join("worktrees").join("feature-branch")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let key = extract_group_key(&repo.to_string_lossy());
+        match key {
+            GroupKey::Worktree { repo_path, branch } => {
+                assert_eq!(repo_path, repo);
+                assert_eq!(branch, "main");
+            }
+            other => panic!("Expected Worktree, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_group_key_main_checkout_detached_head_uses_short_sha() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("myrepo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(git_dir.join("worktrees").join("feature-branch")).unwrap();
+        std::fs::write(
+            git_dir.join("HEAD"),
+            "abc123def456789012345678901234567890abcd\n",
+        )
+        .unwrap();
+
+        let key = extract_group_key(&repo.to_string_lossy());
+        match key {
+            GroupKey::Worktree { branch, .. } => {
+                assert_eq!(branch, "abc123de");
+            }
+            other => panic!("Expected Worktree, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_group_key_empty_worktrees_dir_falls_through_to_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("parent").join("myrepo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(git_dir.join("worktrees")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let key = extract_group_key(&repo.to_string_lossy());
+        assert!(
+            matches!(key, GroupKey::Directory { .. }),
+            "Expected Directory, got {:?}",
+            key
+        );
+    }
+
+    #[test]
+    fn extract_group_key_no_worktrees_dir_falls_through_to_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("parent").join("myrepo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let key = extract_group_key(&repo.to_string_lossy());
+        assert!(
+            matches!(key, GroupKey::Directory { .. }),
+            "Expected Directory, got {:?}",
+            key
+        );
+    }
+
+    #[test]
+    fn extract_group_key_garbage_head_falls_through_to_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("parent").join("myrepo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(git_dir.join("worktrees").join("feature")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "garbage content\n").unwrap();
+
+        let key = extract_group_key(&repo.to_string_lossy());
+        assert!(
+            matches!(key, GroupKey::Directory { .. }),
+            "Expected Directory, got {:?}",
+            key
+        );
+    }
+
+    #[test]
+    fn main_checkout_and_added_worktree_share_same_project_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("myrepo");
+
+        // Set up main checkout (.git is a directory with worktrees/)
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(git_dir.join("worktrees").join("feature")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        // Set up added worktree (.git is a file pointing back)
+        let worktree_path = dir.path().join("feature");
+        std::fs::create_dir_all(&worktree_path).unwrap();
+        let gitdir_target = git_dir.join("worktrees").join("feature");
+        std::fs::write(
+            worktree_path.join(".git"),
+            format!("gitdir: {}", gitdir_target.display()),
+        )
+        .unwrap();
+
+        let main_conv = make_conversation(&repo.to_string_lossy(), 100);
+        let wt_conv = make_conversation(&worktree_path.to_string_lossy(), 200);
+
+        let groups = group_conversations(vec![main_conv, wt_conv]);
+
+        // Both should be Worktree groups with the same repo_path
+        let worktree_groups: Vec<_> = groups
+            .iter()
+            .filter(|g| matches!(g, ConversationGroup::Worktree { .. }))
+            .collect();
+        assert_eq!(
+            worktree_groups.len(),
+            2,
+            "Expected 2 Worktree groups, got: {:?}",
+            groups
+                .iter()
+                .map(ConversationGroup::key)
+                .collect::<Vec<_>>()
+        );
+
+        // Their project_key() should match (same repo_path)
+        assert_eq!(
+            worktree_groups[0].project_key(),
+            worktree_groups[1].project_key(),
+            "Main checkout and added worktree should have the same project_key"
+        );
     }
 }
