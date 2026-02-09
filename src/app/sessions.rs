@@ -374,32 +374,37 @@ impl App {
         }
     }
 
-    /// Scroll up by the specified number of lines (active session only)
+    /// Get the session ID currently displayed (preview takes priority over active).
+    /// Mirrors the logic in `update_session_state`.
+    fn display_session_id(&self) -> Option<String> {
+        self.preview_session_id
+            .clone()
+            .or(self.active_session_id.clone())
+    }
+
+    /// Scroll up by the specified number of lines in the displayed session
     pub fn scroll_up(&mut self, lines: usize) {
         self.text_selection = None;
-        // Clone needed: immutable borrow of session_id + mutable borrow of session_manager
-        if let Some(ref session_id) = self.active_session_id.clone() {
+        if let Some(ref session_id) = self.display_session_id() {
             if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_up(lines);
             }
         }
     }
 
-    /// Scroll down by the specified number of lines (active session only)
+    /// Scroll down by the specified number of lines in the displayed session
     pub fn scroll_down(&mut self, lines: usize) {
         self.text_selection = None;
-        // Clone needed: immutable borrow of session_id + mutable borrow of session_manager
-        if let Some(ref session_id) = self.active_session_id.clone() {
+        if let Some(ref session_id) = self.display_session_id() {
             if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_down(lines);
             }
         }
     }
 
-    /// Jump to the bottom (live view) for active session
+    /// Jump to the bottom (live view) for the displayed session
     pub fn scroll_to_bottom(&mut self) {
-        // Clone needed: immutable borrow of session_id + mutable borrow of session_manager
-        if let Some(ref session_id) = self.active_session_id.clone() {
+        if let Some(ref session_id) = self.display_session_id() {
             if let Some(session) = self.session_manager.get_session_mut(session_id) {
                 session.scroll_to_bottom();
             }
