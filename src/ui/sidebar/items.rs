@@ -88,9 +88,9 @@ pub fn build_sidebar_items(
             // When hide_inactive is on, only show OtherHeader if at least one
             // "other" group has active content (avoids empty header).
             let show_other = !ctx.hide_inactive
-                || all_other_groups
-                    .iter()
-                    .any(|g| group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions));
+                || all_other_groups.iter().any(|g| {
+                    group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions)
+                });
 
             if show_other {
                 items.push(SidebarItem::OtherHeader {

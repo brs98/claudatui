@@ -47,31 +47,106 @@ impl HelpMenuWidget {
     /// All normal-mode keybinding entries
     fn entries() -> Vec<HelpEntry> {
         vec![
-            HelpEntry { key: "j/k", label: "nav" },
-            HelpEntry { key: "g", label: "first" },
-            HelpEntry { key: "G", label: "last" },
-            HelpEntry { key: "1-9", label: "count" },
-            HelpEntry { key: "Enter", label: "open" },
-            HelpEntry { key: "l", label: "terminal" },
-            HelpEntry { key: "dd", label: "close" },
-            HelpEntry { key: "a", label: "add" },
-            HelpEntry { key: "p", label: "preview" },
-            HelpEntry { key: "Tab", label: "inactive" },
-            HelpEntry { key: "/", label: "search" },
-            HelpEntry { key: "n", label: "project" },
-            HelpEntry { key: "f", label: "filter" },
-            HelpEntry { key: "r", label: "refresh" },
-            HelpEntry { key: "y", label: "yank" },
-            HelpEntry { key: "x", label: "archive" },
-            HelpEntry { key: "u", label: "unarchive" },
-            HelpEntry { key: "A", label: "cycle archive" },
-            HelpEntry { key: "D", label: "dangerous" },
-            HelpEntry { key: "w", label: "worktree" },
-            HelpEntry { key: "W", label: "wt search" },
-            HelpEntry { key: "q", label: "quit" },
-            HelpEntry { key: "C-q", label: "quit" },
-            HelpEntry { key: "Alt+.", label: "next proj" },
-            HelpEntry { key: "Alt+,", label: "prev proj" },
+            HelpEntry {
+                key: "j/k",
+                label: "nav",
+            },
+            HelpEntry {
+                key: "g",
+                label: "first",
+            },
+            HelpEntry {
+                key: "G",
+                label: "last",
+            },
+            HelpEntry {
+                key: "1-9",
+                label: "count",
+            },
+            HelpEntry {
+                key: "Enter",
+                label: "open",
+            },
+            HelpEntry {
+                key: "l",
+                label: "terminal",
+            },
+            HelpEntry {
+                key: "dd",
+                label: "close",
+            },
+            HelpEntry {
+                key: "a",
+                label: "add",
+            },
+            HelpEntry {
+                key: "p",
+                label: "preview",
+            },
+            HelpEntry {
+                key: "Tab",
+                label: "inactive",
+            },
+            HelpEntry {
+                key: "/",
+                label: "search",
+            },
+            HelpEntry {
+                key: "n",
+                label: "project",
+            },
+            HelpEntry {
+                key: "f",
+                label: "filter",
+            },
+            HelpEntry {
+                key: "r",
+                label: "refresh",
+            },
+            HelpEntry {
+                key: "y",
+                label: "yank",
+            },
+            HelpEntry {
+                key: "x",
+                label: "archive",
+            },
+            HelpEntry {
+                key: "u",
+                label: "unarchive",
+            },
+            HelpEntry {
+                key: "A",
+                label: "cycle archive",
+            },
+            HelpEntry {
+                key: "D",
+                label: "dangerous",
+            },
+            HelpEntry {
+                key: "w",
+                label: "worktree",
+            },
+            HelpEntry {
+                key: "W",
+                label: "wt search",
+            },
+            HelpEntry {
+                key: "q",
+                label: "quit",
+            },
+            HelpEntry {
+                key: "C-q",
+                label: "quit",
+            },
+            HelpEntry {
+                key: "Alt+.",
+                label: "next proj",
+            },
+            HelpEntry {
+                key: "Alt+,",
+                label: "prev proj",
+            },
         ]
     }
 
