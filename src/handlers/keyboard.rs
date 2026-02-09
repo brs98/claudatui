@@ -423,7 +423,7 @@ pub(crate) fn forward_key_to_filter(app: &mut App, key: KeyEvent) {
         FilterKeyResult::Continue => {}
         FilterKeyResult::QueryChanged => {
             // Reset selection to top and update
-            app.sidebar_state.list_state.select(Some(0));
+            app.sidebar_state.list_state.select(Some(1));
             app.update_selected_conversation();
         }
         FilterKeyResult::Deactivated => {
@@ -539,6 +539,14 @@ pub(crate) fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<
         // Tab toggles hide inactive
         KeyCode::Tab => {
             app.sidebar_state.toggle_hide_inactive();
+            // Clamp selection to stay within bounds after items change
+            let items = app.sidebar_items();
+            let max = items.len().saturating_sub(1);
+            let selected = app.sidebar_state.list_state.selected().unwrap_or(0);
+            if selected > max {
+                app.sidebar_state.list_state.select(Some(max));
+            }
+            app.update_selected_conversation();
         }
 
         // Direct actions (kept for convenience, also available via leader)

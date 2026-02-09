@@ -101,7 +101,7 @@ impl SidebarState {
     /// Create a new sidebar state with the first item selected.
     pub fn new() -> Self {
         let mut state = Self::default();
-        state.list_state.select(Some(0));
+        state.list_state.select(Some(1));
         state
     }
 
@@ -150,6 +150,11 @@ impl SidebarState {
     /// Toggle filtering to show only active/running sessions.
     pub fn toggle_hide_inactive(&mut self) {
         self.hide_inactive = !self.hide_inactive;
+        // Clear collapse state so everything starts expanded in the new mode.
+        // Prevents stale collapses from hiding active conversations when entering
+        // active mode, and gives a clean slate when returning to normal mode.
+        self.collapsed_groups.clear();
+        self.collapsed_projects.clear();
     }
 
     /// Toggle collapse state of the "Other" section.

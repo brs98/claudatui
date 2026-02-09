@@ -593,7 +593,7 @@ impl App {
         self.sidebar_state.clear_filter();
         self.input_mode = InputMode::Normal;
         self.escape_seq_state = EscapeSequenceState::None;
-        self.sidebar_state.list_state.select(Some(0));
+        self.sidebar_state.list_state.select(Some(1));
         self.update_selected_conversation();
     }
 

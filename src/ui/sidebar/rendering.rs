@@ -15,7 +15,7 @@ use crate::claude::grouping::ConversationGroup;
 
 use super::items::{
     conv_matches_filter, group_has_active_content, is_hidden_plan_implementation,
-    should_show_conversation,
+    project_has_active_content, should_show_conversation,
 };
 use super::{ArchiveFilter, ControlAction, SectionKind, SidebarContext, SidebarState, PAGE_SIZE};
 
@@ -106,6 +106,11 @@ impl<'a> StatefulWidget for Sidebar<'a> {
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("> ");
+
+        // Ensure the Workspaces header (index 0) stays visible when selection is near the top
+        if state.list_state.selected().is_some_and(|s| s <= 1) {
+            *state.list_state.offset_mut() = 0;
+        }
 
         StatefulWidget::render(list, list_area, buf, &mut state.list_state);
     }
@@ -206,6 +211,17 @@ fn build_list_items(
         let workspace_projects = group_by_project(&workspace_groups);
 
         for (project_key, project_name, groups) in &workspace_projects {
+            // Skip projects with no active content in active mode
+            if ctx.hide_inactive
+                && !project_has_active_content(
+                    groups,
+                    ctx.running_sessions,
+                    ctx.ephemeral_sessions,
+                )
+            {
+                continue;
+            }
+
             let is_project_collapsed = collapsed_projects.contains(project_key);
             render_project_header(
                 &mut items,
@@ -235,7 +251,7 @@ fn build_list_items(
         }
 
         // AddWorkspace after workspace projects
-        if !has_text_filter {
+        if !has_text_filter && !ctx.hide_inactive {
             render_add_workspace(&mut items, &mut current_index, selected_index, " ");
         }
 
@@ -244,58 +260,78 @@ fn build_list_items(
             let other_projects = group_by_project(&all_other_groups);
             let total_group_count: usize = other_projects.iter().map(|(_, _, g)| g.len()).sum();
 
-            let arrow = if other_collapsed {
-                "\u{25b8}"
-            } else {
-                "\u{25be}"
-            };
-            let header = format!("{} Other ({} projects)", arrow, total_group_count);
-            let line_num = format_relative_line_number(current_index, selected_index);
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(line_num, Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    header,
-                    Style::default()
-                        .add_modifier(Modifier::BOLD)
-                        .fg(Color::DarkGray),
-                ),
-            ])));
-            current_index += 1;
+            // When hide_inactive is on, only show OtherHeader if at least one
+            // "other" group has active content.
+            let show_other = !ctx.hide_inactive
+                || all_other_groups
+                    .iter()
+                    .any(|g| group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions));
 
-            if !other_collapsed {
-                for (project_key, project_name, groups) in &other_projects {
-                    let is_project_collapsed = collapsed_projects.contains(project_key);
-                    render_project_header(
-                        &mut items,
-                        &mut current_index,
-                        project_name,
-                        is_project_collapsed,
-                        selected_index,
-                        " ",
-                    );
+            if show_other {
+                let arrow = if other_collapsed {
+                    "\u{25b8}"
+                } else {
+                    "\u{25be}"
+                };
+                let header = format!("{} Other ({} projects)", arrow, total_group_count);
+                let line_num = format_relative_line_number(current_index, selected_index);
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(line_num, Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        header,
+                        Style::default()
+                            .add_modifier(Modifier::BOLD)
+                            .fg(Color::DarkGray),
+                    ),
+                ])));
+                current_index += 1;
 
-                    if !is_project_collapsed {
-                        render_groups_list_with_limit(
+                if !other_collapsed {
+                    for (project_key, project_name, groups) in &other_projects {
+                        // Skip projects with no active content in active mode
+                        if ctx.hide_inactive
+                            && !project_has_active_content(
+                                groups,
+                                ctx.running_sessions,
+                                ctx.ephemeral_sessions,
+                            )
+                        {
+                            continue;
+                        }
+
+                        let is_project_collapsed = collapsed_projects.contains(project_key);
+                        render_project_header(
                             &mut items,
                             &mut current_index,
-                            project_key,
-                            groups,
-                            ctx,
-                            collapsed,
-                            visible_conversations,
-                            visible_groups,
+                            project_name,
+                            is_project_collapsed,
                             selected_index,
-                            &filter_lower,
-                            has_text_filter,
-                            2,
+                            " ",
                         );
+
+                        if !is_project_collapsed {
+                            render_groups_list_with_limit(
+                                &mut items,
+                                &mut current_index,
+                                project_key,
+                                groups,
+                                ctx,
+                                collapsed,
+                                visible_conversations,
+                                visible_groups,
+                                selected_index,
+                                &filter_lower,
+                                has_text_filter,
+                                2,
+                            );
+                        }
                     }
                 }
             }
         }
     } else {
         // No workspaces configured: AddWorkspace, then flat projects
-        if !has_text_filter {
+        if !has_text_filter && !ctx.hide_inactive {
             render_add_workspace(&mut items, &mut current_index, selected_index, " ");
         }
 
@@ -304,6 +340,17 @@ fn build_list_items(
         let projects = group_by_project(&all_groups_refs);
 
         for (project_key, project_name, groups) in &projects {
+            // Skip projects with no active content in active mode
+            if ctx.hide_inactive
+                && !project_has_active_content(
+                    groups,
+                    ctx.running_sessions,
+                    ctx.ephemeral_sessions,
+                )
+            {
+                continue;
+            }
+
             let is_project_collapsed = collapsed_projects.contains(project_key);
             render_project_header(
                 &mut items,
@@ -527,7 +574,9 @@ fn render_group_list_items(
     });
 
     // Skip groups with no visible conversations (unless showing all and no text filter)
-    if !has_visible_convs && (ctx.archive_filter != ArchiveFilter::All || has_text_filter) {
+    if !has_visible_convs
+        && (ctx.archive_filter != ArchiveFilter::All || has_text_filter || ctx.hide_inactive)
+    {
         return;
     }
 

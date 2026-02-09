@@ -3,7 +3,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::app::EphemeralSession;
-use crate::claude::conversation::ConversationStatus;
 use crate::claude::grouping::ConversationGroup;
 
 use super::{ArchiveFilter, ControlAction, SectionKind, SidebarContext, SidebarItem, SidebarState};
@@ -47,6 +46,13 @@ pub fn build_sidebar_items(
         let workspace_projects = group_by_project(&workspace_groups);
 
         for (project_key, project_name, groups) in &workspace_projects {
+            // Skip projects with no active content in active mode
+            if ctx.hide_inactive
+                && !project_has_active_content(groups, ctx.running_sessions, ctx.ephemeral_sessions)
+            {
+                continue;
+            }
+
             items.push(SidebarItem::ProjectHeader {
                 project_key: project_key.clone(),
                 name: project_name.clone(),
@@ -69,7 +75,7 @@ pub fn build_sidebar_items(
         }
 
         // AddWorkspace after workspace projects (or after header if none)
-        if !has_text_filter {
+        if !has_text_filter && !ctx.hide_inactive {
             items.push(SidebarItem::AddWorkspace);
         }
 
@@ -79,37 +85,57 @@ pub fn build_sidebar_items(
             // Count total groups across all other projects
             let total_group_count: usize = other_projects.iter().map(|(_, _, g)| g.len()).sum();
 
-            items.push(SidebarItem::OtherHeader {
-                group_count: total_group_count,
-            });
+            // When hide_inactive is on, only show OtherHeader if at least one
+            // "other" group has active content (avoids empty header).
+            let show_other = !ctx.hide_inactive
+                || all_other_groups
+                    .iter()
+                    .any(|g| group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions));
 
-            if !other_collapsed {
-                for (project_key, project_name, groups) in &other_projects {
-                    items.push(SidebarItem::ProjectHeader {
-                        project_key: project_key.clone(),
-                        name: project_name.clone(),
-                        group_count: groups.len(),
-                    });
+            if show_other {
+                items.push(SidebarItem::OtherHeader {
+                    group_count: total_group_count,
+                });
 
-                    if !collapsed_projects.contains(project_key) {
-                        render_groups_with_limit(
-                            &mut items,
-                            project_key,
-                            groups,
-                            ctx,
-                            collapsed,
-                            visible_conversations,
-                            visible_groups,
-                            &filter_lower,
-                            has_text_filter,
-                        );
+                if !other_collapsed {
+                    for (project_key, project_name, groups) in &other_projects {
+                        // Skip projects with no active content in active mode
+                        if ctx.hide_inactive
+                            && !project_has_active_content(
+                                groups,
+                                ctx.running_sessions,
+                                ctx.ephemeral_sessions,
+                            )
+                        {
+                            continue;
+                        }
+
+                        items.push(SidebarItem::ProjectHeader {
+                            project_key: project_key.clone(),
+                            name: project_name.clone(),
+                            group_count: groups.len(),
+                        });
+
+                        if !collapsed_projects.contains(project_key) {
+                            render_groups_with_limit(
+                                &mut items,
+                                project_key,
+                                groups,
+                                ctx,
+                                collapsed,
+                                visible_conversations,
+                                visible_groups,
+                                &filter_lower,
+                                has_text_filter,
+                            );
+                        }
                     }
                 }
             }
         }
     } else {
         // No workspaces configured: WorkspaceSectionHeader + AddWorkspace, then flat projects
-        if !has_text_filter {
+        if !has_text_filter && !ctx.hide_inactive {
             items.push(SidebarItem::AddWorkspace);
         }
 
@@ -118,6 +144,13 @@ pub fn build_sidebar_items(
         let projects = group_by_project(&all_groups_refs);
 
         for (project_key, project_name, groups) in &projects {
+            // Skip projects with no active content in active mode
+            if ctx.hide_inactive
+                && !project_has_active_content(groups, ctx.running_sessions, ctx.ephemeral_sessions)
+            {
+                continue;
+            }
+
             items.push(SidebarItem::ProjectHeader {
                 project_key: project_key.clone(),
                 name: project_name.clone(),
@@ -140,11 +173,11 @@ pub fn build_sidebar_items(
         }
     }
 
-    // During active text filter: remove empty ProjectHeaders and hide AddWorkspace
-    if has_text_filter {
-        // Already handled AddWorkspace above (not inserted when has_text_filter)
+    // Remove empty ProjectHeaders when text filter or hide_inactive is active
+    if has_text_filter || ctx.hide_inactive {
+        // Already handled AddWorkspace above (not inserted when has_text_filter or hide_inactive)
         // Remove ProjectHeaders that have no children following them
-        remove_empty_project_headers(&mut items);
+        remove_empty_headers(&mut items);
     }
 
     items
@@ -170,13 +203,16 @@ fn group_by_project<'a>(
     result
 }
 
-/// Remove ProjectHeader items that have no child items following them
-/// (i.e., the next item is another ProjectHeader, OtherHeader, WorkspaceSectionHeader,
-/// AddWorkspace, SectionControl, or end-of-list).
-fn remove_empty_project_headers(items: &mut Vec<SidebarItem>) {
+/// Remove structural header items (ProjectHeader, OtherHeader) that have no child items
+/// following them (i.e., the next item is another header, AddWorkspace, SectionControl,
+/// or end-of-list).
+fn remove_empty_headers(items: &mut Vec<SidebarItem>) {
     let mut i = 0;
     while i < items.len() {
-        if matches!(items[i], SidebarItem::ProjectHeader { .. }) {
+        if matches!(
+            items[i],
+            SidebarItem::ProjectHeader { .. } | SidebarItem::OtherHeader { .. }
+        ) {
             let next_is_empty = if i + 1 >= items.len() {
                 true
             } else {
@@ -307,7 +343,9 @@ fn render_group_items(
     });
 
     // Skip groups with no visible conversations
-    if !has_visible_convs && (ctx.archive_filter != ArchiveFilter::All || has_text_filter) {
+    if !has_visible_convs
+        && (ctx.archive_filter != ArchiveFilter::All || has_text_filter || ctx.hide_inactive)
+    {
         return;
     }
 
@@ -407,6 +445,17 @@ fn render_group_items(
     }
 }
 
+/// Check if a project (collection of groups) has any active content (for hide_inactive filtering)
+pub fn project_has_active_content(
+    groups: &[&ConversationGroup],
+    running_sessions: &HashSet<String>,
+    ephemeral_sessions: &HashMap<String, EphemeralSession>,
+) -> bool {
+    groups
+        .iter()
+        .any(|g| group_has_active_content(g, running_sessions, ephemeral_sessions))
+}
+
 /// Check if a group has any active content (for hide_inactive filtering)
 pub fn group_has_active_content(
     group: &ConversationGroup,
@@ -432,8 +481,7 @@ pub fn group_has_active_content(
         if is_hidden_plan_implementation(conv, running_sessions, group_has_running_parent) {
             continue;
         }
-        let is_running = running_sessions.contains(&conv.session_id);
-        if is_running || !matches!(conv.status, ConversationStatus::Idle) {
+        if running_sessions.contains(&conv.session_id) {
             return true;
         }
     }
@@ -488,14 +536,9 @@ pub(super) fn should_show_conversation(
         return false;
     }
 
-    // Then check hide_inactive filter
+    // Then check hide_inactive filter — only trust live PTY, not stale JSONL status
     if hide_inactive {
-        let is_running = running_sessions.contains(&conv.session_id);
-        return is_running
-            || !matches!(
-                conv.status,
-                crate::claude::conversation::ConversationStatus::Idle
-            );
+        return running_sessions.contains(&conv.session_id);
     }
 
     true
