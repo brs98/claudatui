@@ -243,6 +243,67 @@ fn load_index_cache(project_dir: &Path) -> HashMap<String, SessionEntryRaw> {
         .collect()
 }
 
+/// Recursively resolve path segments with backtracking.
+/// Tries shortest matches first; backtracks to longer candidates when
+/// remaining segments can't resolve to existing directories.
+/// Returns Some only when ALL segments resolve to existing paths.
+fn resolve_segments(segments: &[&str], base: &Path) -> Option<PathBuf> {
+    if segments.is_empty() {
+        return Some(base.to_path_buf());
+    }
+
+    // Handle dot-prefixed directory (empty segment from --)
+    if segments[0].is_empty() && segments.len() > 1 {
+        let mut candidate = format!(".{}", segments[1]);
+        for i in 1..segments.len() {
+            if i > 1 {
+                if segments[i].is_empty() {
+                    break;
+                }
+                candidate = format!("{}-{}", candidate, segments[i]);
+            }
+            let test_path = base.join(&candidate);
+            if test_path.exists() {
+                if let Some(result) = resolve_segments(&segments[i + 1..], &test_path) {
+                    return Some(result);
+                }
+            }
+        }
+        return None;
+    }
+
+    // Regular segments: try progressively longer hyphenated combinations
+    let mut candidate = segments[0].to_string();
+    for i in 0..segments.len() {
+        if i > 0 {
+            if segments[i].is_empty() {
+                break; // stop at dot-prefix marker
+            }
+            candidate = format!("{}-{}", candidate, segments[i]);
+        }
+
+        let test_path = base.join(&candidate);
+        if test_path.exists() {
+            if let Some(result) = resolve_segments(&segments[i + 1..], &test_path) {
+                return Some(result);
+            }
+        }
+
+        // Try dot-insertion variant (e.g., candidate.next → foo.git)
+        if i < segments.len() - 1 && !segments[i + 1].is_empty() {
+            let dot_candidate = format!("{}.{}", candidate, segments[i + 1]);
+            let dot_test = base.join(&dot_candidate);
+            if dot_test.exists() {
+                if let Some(result) = resolve_segments(&segments[i + 2..], &dot_test) {
+                    return Some(result);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Extract project path from escaped directory name
 ///
 /// Claude Code escapes paths by:
@@ -276,7 +337,12 @@ fn extract_project_path(dir_name: &str) -> String {
         return String::new();
     }
 
-    // Build path by validating against filesystem
+    // Try backtracking resolution (correctly handles ambiguous hyphens when path exists)
+    if let Some(path) = resolve_segments(&segments, &PathBuf::from("/")) {
+        return path.to_string_lossy().into_owned();
+    }
+
+    // Greedy fallback for paths that no longer exist on disk
     let mut path = PathBuf::from("/");
     let mut i = 0;
 
@@ -555,6 +621,72 @@ mod tests {
 
         let result = extract_project_path(&full_escaped);
         assert_eq!(result, hidden_dir.to_string_lossy().into_owned());
+
+        // Clean up
+        let _ = fs::remove_dir_all(&test_base);
+    }
+
+    #[test]
+    fn extract_project_path_backtracks_for_shared_prefix_sibling() {
+        // Regression: when `claudatui` exists as a sibling of `claudatui-testing-3`,
+        // the greedy algorithm incorrectly matches `claudatui` first and then can't
+        // resolve `testing-3` as a subdirectory. Backtracking should find the longer
+        // match `claudatui-testing-3`.
+        use std::fs;
+
+        let test_base = std::env::temp_dir().join("claudatui-test-backtrack");
+        let _ = fs::remove_dir_all(&test_base);
+
+        // Create both: a short-prefix dir and a longer sibling with hyphens
+        let short_dir = test_base.join("claudatui");
+        let long_dir = test_base.join("claudatui-testing-3");
+        fs::create_dir_all(&short_dir).expect("Failed to create short dir");
+        fs::create_dir_all(&long_dir).expect("Failed to create long dir");
+
+        // Escaped path for the longer sibling
+        let base_str = test_base.to_string_lossy();
+        let escaped = base_str.replace('/', "-");
+        let full_escaped = format!("{}-claudatui-testing-3", escaped);
+
+        let result = extract_project_path(&full_escaped);
+        assert_eq!(result, long_dir.to_string_lossy().into_owned());
+
+        // Clean up
+        let _ = fs::remove_dir_all(&test_base);
+    }
+
+    #[test]
+    fn extract_project_path_greedy_fallback_for_deleted_paths() {
+        // When no path exists on disk, backtracking returns None and the greedy
+        // fallback kicks in. Since no segments exist, the greedy algorithm
+        // concatenates everything into one component.
+        let result = extract_project_path("-zzz-nonexistent-aaa-bbb-ccc");
+        // Should still produce a path starting with /
+        assert!(result.starts_with("/"));
+        // The path contains the original segments (joined however the greedy algorithm decides)
+        assert!(result.contains("zzz"));
+        assert!(result.contains("nonexistent"));
+    }
+
+    #[test]
+    fn extract_project_path_hidden_dir_with_backtracking() {
+        // Dot-prefixed directories should work with the backtracking resolver
+        use std::fs;
+
+        let test_base = std::env::temp_dir().join("claudatui-test-hidden-backtrack");
+        let _ = fs::remove_dir_all(&test_base);
+
+        let hidden_dir = test_base.join(".config");
+        let sub_dir = hidden_dir.join("myapp");
+        fs::create_dir_all(&sub_dir).expect("Failed to create test dirs");
+
+        let base_str = test_base.to_string_lossy();
+        let escaped = base_str.replace('/', "-");
+        // .config -> --config in escaped form
+        let full_escaped = format!("{}--config-myapp", escaped);
+
+        let result = extract_project_path(&full_escaped);
+        assert_eq!(result, sub_dir.to_string_lossy().into_owned());
 
         // Clean up
         let _ = fs::remove_dir_all(&test_base);
