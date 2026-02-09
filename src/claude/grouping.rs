@@ -210,21 +210,33 @@ fn extract_group_key(project_path: &str) -> GroupKey {
         if let Ok(contents) = std::fs::read_to_string(&dot_git) {
             if let Some(gitdir) = contents.trim().strip_prefix("gitdir: ") {
                 let gitdir_path = PathBuf::from(gitdir);
-                // gitdir_path = /repo/.git/worktrees/<name>
-                // Navigate up to repo root: worktrees -> .git -> repo
-                if let Some(repo_root) = gitdir_path
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.parent())
-                {
+                // Navigate up 2 levels to the "git container":
+                //   normal → /repo/.git
+                //   bare   → /repo.git
+                let git_container = gitdir_path.parent().and_then(|p| p.parent());
+
+                if let Some(container) = git_container {
                     let branch = gitdir_path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    return GroupKey::Worktree {
-                        repo_path: repo_root.to_path_buf(),
-                        branch,
+
+                    let repo_root = if container.file_name().is_some_and(|n| n == ".git") {
+                        // Normal repo: container is .git dir, repo root is its parent
+                        container.parent()
+                    } else if container.join("HEAD").exists() && container.join("refs").is_dir() {
+                        // Bare repo: container IS the repo
+                        Some(container)
+                    } else {
+                        None
                     };
+
+                    if let Some(root) = repo_root {
+                        return GroupKey::Worktree {
+                            repo_path: root.to_path_buf(),
+                            branch,
+                        };
+                    }
                 }
             }
         }
@@ -795,5 +807,37 @@ mod tests {
             worktree_groups[1].project_key(),
             "Main checkout and added worktree should have the same project_key"
         );
+    }
+
+    #[test]
+    fn extract_group_key_bare_repo_worktree_from_dot_git_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a bare repo structure: repo.git/ with HEAD + refs/
+        let bare_repo = dir.path().join("myrepo.git");
+        std::fs::create_dir_all(bare_repo.join("refs")).unwrap();
+        std::fs::write(bare_repo.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        // Create a worktrees entry inside the bare repo
+        let worktree_gitdir = bare_repo.join("worktrees").join("feature");
+        std::fs::create_dir_all(&worktree_gitdir).unwrap();
+
+        // Create the worktree directory with a .git file pointing to the bare repo
+        let worktree_dir = dir.path().join("feature");
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        std::fs::write(
+            worktree_dir.join(".git"),
+            format!("gitdir: {}", worktree_gitdir.display()),
+        )
+        .unwrap();
+
+        let key = extract_group_key(&worktree_dir.to_string_lossy());
+        match key {
+            GroupKey::Worktree { repo_path, branch } => {
+                assert_eq!(repo_path, bare_repo);
+                assert_eq!(branch, "feature");
+            }
+            other => panic!("Expected Worktree with bare repo path, got {:?}", other),
+        }
     }
 }

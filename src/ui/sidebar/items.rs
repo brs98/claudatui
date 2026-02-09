@@ -56,7 +56,7 @@ pub fn build_sidebar_items(
             items.push(SidebarItem::ProjectHeader {
                 project_key: project_key.clone(),
                 name: project_name.clone(),
-                group_count: groups.len(),
+                group_count: visible_group_count(groups, ctx),
             });
 
             if !collapsed_projects.contains(project_key) {
@@ -83,7 +83,10 @@ pub fn build_sidebar_items(
         if !all_other_groups.is_empty() {
             let other_projects = group_by_project(&all_other_groups);
             // Count total groups across all other projects
-            let total_group_count: usize = other_projects.iter().map(|(_, _, g)| g.len()).sum();
+            let total_group_count: usize = other_projects
+                .iter()
+                .map(|(_, _, g)| visible_group_count(g, ctx))
+                .sum();
 
             // When hide_inactive is on, only show OtherHeader if at least one
             // "other" group has active content (avoids empty header).
@@ -113,7 +116,7 @@ pub fn build_sidebar_items(
                         items.push(SidebarItem::ProjectHeader {
                             project_key: project_key.clone(),
                             name: project_name.clone(),
-                            group_count: groups.len(),
+                            group_count: visible_group_count(groups, ctx),
                         });
 
                         if !collapsed_projects.contains(project_key) {
@@ -154,7 +157,7 @@ pub fn build_sidebar_items(
             items.push(SidebarItem::ProjectHeader {
                 project_key: project_key.clone(),
                 name: project_name.clone(),
-                group_count: groups.len(),
+                group_count: visible_group_count(groups, ctx),
             });
 
             if !collapsed_projects.contains(project_key) {
@@ -247,14 +250,23 @@ fn render_groups_with_limit(
     filter_lower: &str,
     has_text_filter: bool,
 ) {
-    let total = groups.len();
+    let filtered_groups: Vec<&ConversationGroup> = if ctx.hide_inactive {
+        groups
+            .iter()
+            .copied()
+            .filter(|g| group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions))
+            .collect()
+    } else {
+        groups.to_vec()
+    };
+    let total = filtered_groups.len();
     let vis = if has_text_filter {
         total
     } else {
         SidebarState::visible_count(visible_groups, project_key).min(total)
     };
 
-    for group in &groups[..vis] {
+    for group in filtered_groups.iter().take(vis) {
         render_group_items(
             items,
             group,
@@ -442,6 +454,18 @@ fn render_group_items(
                 });
             }
         }
+    }
+}
+
+/// Count how many groups are visible after applying hide_inactive filtering.
+pub(super) fn visible_group_count(groups: &[&ConversationGroup], ctx: &SidebarContext) -> usize {
+    if ctx.hide_inactive {
+        groups
+            .iter()
+            .filter(|g| group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions))
+            .count()
+    } else {
+        groups.len()
     }
 }
 

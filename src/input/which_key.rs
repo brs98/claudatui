@@ -44,6 +44,10 @@ pub enum LeaderAction {
     WorktreeSearch,
     /// Open workspace management modal
     ManageWorkspaces,
+
+    // View
+    /// Toggle mosaic view (all active sessions in a grid)
+    ToggleMosaic,
 }
 
 /// A command entry in the which-key menu
@@ -145,6 +149,16 @@ impl WhichKeyConfig {
                     'p',
                     "workspaces",
                     LeaderAction::ManageWorkspaces,
+                )],
+            ),
+            // View submenu
+            LeaderCommand::submenu(
+                'v',
+                "view",
+                vec![LeaderCommand::action(
+                    'm',
+                    "mosaic",
+                    LeaderAction::ToggleMosaic,
                 )],
             ),
             // Other actions

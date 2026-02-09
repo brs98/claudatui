@@ -81,6 +81,8 @@ pub enum Focus {
     Sidebar,
     /// A terminal pane has focus
     Terminal(TerminalPaneId),
+    /// Mosaic grid view has focus
+    Mosaic,
 }
 
 /// State for tracking jk/kj rapid-press escape sequence in insert mode
@@ -237,6 +239,10 @@ pub struct App {
     resume_jsonl_sizes: HashMap<String, u64>,
     /// Whether the help menu overlay is open (toggled by '?')
     pub help_menu_open: bool,
+    /// Index of the selected pane in mosaic grid view
+    pub mosaic_selected: usize,
+    /// Cached session states for mosaic rendering (session_id, display_name, state)
+    pub mosaic_state_cache: Vec<(String, String, SessionState)>,
 }
 
 impl App {
@@ -301,6 +307,8 @@ impl App {
             last_live_status_poll: None,
             resume_jsonl_sizes: HashMap::new(),
             help_menu_open: false,
+            mosaic_selected: 0,
+            mosaic_state_cache: Vec::new(),
         };
 
         app.load_conversations_full()?;

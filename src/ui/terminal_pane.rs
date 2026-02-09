@@ -14,6 +14,7 @@ pub struct TerminalPane<'a> {
     focused: bool,
     preview: bool,
     selection: Option<&'a TextSelection>,
+    title: Option<String>,
 }
 
 impl<'a> TerminalPane<'a> {
@@ -28,7 +29,14 @@ impl<'a> TerminalPane<'a> {
             focused,
             preview,
             selection,
+            title: None,
         }
+    }
+
+    /// Override the default "Claude Code" title with a custom string.
+    pub fn with_title(mut self, title: String) -> Self {
+        self.title = Some(title);
+        self
     }
 }
 
@@ -44,16 +52,17 @@ impl<'a> Widget for TerminalPane<'a> {
         let scroll_offset = self.session_state.map(|s| s.scroll_offset).unwrap_or(0);
 
         // Show scroll/preview indicators in title
+        let base_title = self.title.as_deref().unwrap_or("Claude Code");
         let title = if self.preview {
             if scroll_offset > 0 {
-                format!(" Claude Code [PREVIEW] [SCROLLED: -{}] ", scroll_offset)
+                format!(" {} [PREVIEW] [SCROLLED: -{}] ", base_title, scroll_offset)
             } else {
-                " Claude Code [PREVIEW] ".to_string()
+                format!(" {} [PREVIEW] ", base_title)
             }
         } else if scroll_offset > 0 {
-            format!(" Claude Code [SCROLLED: -{}] ", scroll_offset)
+            format!(" {} [SCROLLED: -{}] ", base_title, scroll_offset)
         } else {
-            " Claude Code ".to_string()
+            format!(" {} ", base_title)
         };
 
         let block = Block::default()

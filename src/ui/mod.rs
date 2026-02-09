@@ -3,6 +3,7 @@
 pub mod help_menu;
 pub mod layout;
 pub mod modal;
+pub mod mosaic;
 pub mod sidebar;
 pub mod terminal_pane;
 pub mod toast;

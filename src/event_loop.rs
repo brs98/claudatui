@@ -13,7 +13,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use crate::app::{App, ChordState, Focus};
+use crate::app::{App, ChordState, Focus, SplitMode};
 use crate::handlers::keyboard::{flush_buffered_key, handle_key_event};
 use crate::handlers::mouse::handle_mouse_event;
 use crate::input::InputMode;
@@ -21,6 +21,7 @@ use crate::ui::layout::create_layout_with_help_config;
 use crate::ui::modal::{
     NewProjectModal, SearchModal, WorkspaceModal, WorktreeModal, WorktreeSearchModal,
 };
+use crate::ui::mosaic::MosaicView;
 use crate::ui::sidebar::{Sidebar, SidebarContext};
 use crate::ui::terminal_pane::TerminalPane;
 use crate::ui::toast_widget::{ToastPosition, ToastWidget};
@@ -69,6 +70,9 @@ pub fn run_app(
 
         // Update session state cache for rendering
         app.update_session_state();
+
+        // Update mosaic state cache (no-ops when not in mosaic mode)
+        app.update_mosaic_state_cache();
 
         // Check all sessions for dead PTYs and clean up
         app.check_all_session_status();
@@ -154,26 +158,34 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
     let sidebar = Sidebar::new(&sidebar_ctx, app.focus == Focus::Sidebar);
     f.render_stateful_widget(sidebar, sidebar_area, &mut app.sidebar_state);
 
-    // Cache terminal inner area for mouse coordinate mapping (area minus 1px border)
-    let terminal_inner = Rect {
-        x: terminal_area.x + 1,
-        y: terminal_area.y + 1,
-        width: terminal_area.width.saturating_sub(2),
-        height: terminal_area.height.saturating_sub(2),
-    };
-    app.terminal_inner_area = Some(terminal_inner);
+    if app.split_mode == SplitMode::Mosaic {
+        // Render mosaic grid view
+        let mosaic = MosaicView::new(&app.mosaic_state_cache, app.mosaic_selected);
+        f.render_widget(mosaic, terminal_area);
+        // Clear terminal inner area cache (not used in mosaic mode)
+        app.terminal_inner_area = None;
+    } else {
+        // Cache terminal inner area for mouse coordinate mapping (area minus 1px border)
+        let terminal_inner = Rect {
+            x: terminal_area.x + 1,
+            y: terminal_area.y + 1,
+            width: terminal_area.width.saturating_sub(2),
+            height: terminal_area.height.saturating_sub(2),
+        };
+        app.terminal_inner_area = Some(terminal_inner);
 
-    // Draw terminal pane with session state from daemon
-    let session_state = app.get_session_state();
-    let is_preview = app.preview_session_id.is_some() && app.focus == Focus::Sidebar;
-    let selection = app.text_selection.as_ref();
-    let terminal_pane = TerminalPane::new(
-        session_state,
-        matches!(app.focus, Focus::Terminal(_)),
-        is_preview,
-        selection,
-    );
-    f.render_widget(terminal_pane, terminal_area);
+        // Draw terminal pane with session state from daemon
+        let session_state = app.get_session_state();
+        let is_preview = app.preview_session_id.is_some() && app.focus == Focus::Sidebar;
+        let selection = app.text_selection.as_ref();
+        let terminal_pane = TerminalPane::new(
+            session_state,
+            matches!(app.focus, Focus::Terminal(_)),
+            is_preview,
+            selection,
+        );
+        f.render_widget(terminal_pane, terminal_area);
+    }
 
     // Draw help bar or hot reload status
     match hot_reload_status {
@@ -399,6 +411,27 @@ fn draw_help_bar(f: &mut Frame, area: Rect, app: &App) {
             spans.extend(vec![
                 Span::styled(" jk ", Style::default().fg(Color::Cyan)),
                 Span::raw("sidebar "),
+                Span::styled(" ? ", Style::default().fg(Color::Cyan)),
+                Span::raw("help"),
+            ]);
+            spans
+        }
+        Focus::Mosaic => {
+            let mosaic_indicator = Span::styled(
+                " -- MOSAIC -- ",
+                Style::default().fg(Color::Black).bg(Color::Magenta),
+            );
+            let mut spans = vec![mosaic_indicator];
+            if let Some(danger) = dangerous_indicator {
+                spans.push(danger);
+            }
+            spans.extend(vec![
+                Span::styled(" h/j/k/l ", Style::default().fg(Color::Cyan)),
+                Span::raw("navigate "),
+                Span::styled(" Enter ", Style::default().fg(Color::Cyan)),
+                Span::raw("zoom "),
+                Span::styled(" Esc ", Style::default().fg(Color::Cyan)),
+                Span::raw("exit "),
                 Span::styled(" ? ", Style::default().fg(Color::Cyan)),
                 Span::raw("help"),
             ]);

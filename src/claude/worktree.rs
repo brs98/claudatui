@@ -74,27 +74,38 @@ pub fn detect_repo_info(project_path: &Path) -> Option<RepoInfo> {
     }
 
     if dot_git.is_file() {
-        // .git is a file — this is a worktree of a non-bare repo.
-        // File contents: "gitdir: /path/to/repo/.git/worktrees/<branch-name>"
+        // .git is a file — this is a worktree. Parse the gitdir pointer to find the repo.
+        // File contents: "gitdir: /path/to/repo/.git/worktrees/<name>" (normal)
+        //             or "gitdir: /path/to/repo.git/worktrees/<name>" (bare)
         if let Ok(contents) = std::fs::read_to_string(&dot_git) {
             if let Some(gitdir) = contents.trim().strip_prefix("gitdir: ") {
                 let gitdir_path = PathBuf::from(gitdir);
-                // Navigate from .git/worktrees/<name> back to the repo root
-                // gitdir_path = /repo/.git/worktrees/<name>
-                // parent three times: worktrees -> .git -> repo root
-                if let Some(repo_root) = gitdir_path
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.parent())
-                {
+                // Navigate up 2 levels to the "git container":
+                //   normal → /repo/.git
+                //   bare   → /repo.git
+                let git_container = gitdir_path.parent().and_then(|p| p.parent());
+
+                if let Some(container) = git_container {
                     let branch = gitdir_path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    return Some(RepoInfo::NormalRepoWorktree {
-                        repo_path: repo_root.to_path_buf(),
-                        branch,
-                    });
+
+                    if container.file_name().is_some_and(|n| n == ".git") {
+                        // Normal repo: container is .git dir, repo root is its parent
+                        if let Some(repo_root) = container.parent() {
+                            return Some(RepoInfo::NormalRepoWorktree {
+                                repo_path: repo_root.to_path_buf(),
+                                branch,
+                            });
+                        }
+                    } else if container.join("HEAD").exists() && container.join("refs").is_dir() {
+                        // Bare repo: container IS the repo
+                        return Some(RepoInfo::BareRepoWorktree {
+                            repo_path: container.to_path_buf(),
+                            branch,
+                        });
+                    }
                 }
             }
         }
@@ -170,4 +181,113 @@ pub fn create_worktree(repo_info: &RepoInfo, branch_name: &str) -> Result<PathBu
     }
 
     Ok(worktree_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_bare_repo_worktree_from_dot_git_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a bare repo structure: repo.git/ with HEAD + refs/
+        let bare_repo = dir.path().join("myrepo.git");
+        std::fs::create_dir_all(bare_repo.join("refs")).unwrap();
+        std::fs::write(bare_repo.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        // Create a worktrees entry inside the bare repo
+        let worktree_gitdir = bare_repo.join("worktrees").join("feature");
+        std::fs::create_dir_all(&worktree_gitdir).unwrap();
+
+        // Create the worktree directory with a .git file pointing to the bare repo
+        let worktree_dir = dir.path().join("feature");
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        std::fs::write(
+            worktree_dir.join(".git"),
+            format!("gitdir: {}", worktree_gitdir.display()),
+        )
+        .unwrap();
+
+        let info = detect_repo_info(&worktree_dir).expect("should detect repo info");
+        match info {
+            RepoInfo::BareRepoWorktree { repo_path, branch } => {
+                assert_eq!(repo_path, bare_repo);
+                assert_eq!(branch, "feature");
+            }
+            other => panic!("Expected BareRepoWorktree, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detect_normal_repo_worktree_from_dot_git_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a normal repo structure: repo/.git/ with worktrees/
+        let repo = dir.path().join("myrepo");
+        let git_dir = repo.join(".git");
+        let worktree_gitdir = git_dir.join("worktrees").join("feature");
+        std::fs::create_dir_all(&worktree_gitdir).unwrap();
+
+        // Create the worktree directory with a .git file
+        let worktree_dir = dir.path().join("feature");
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        std::fs::write(
+            worktree_dir.join(".git"),
+            format!("gitdir: {}", worktree_gitdir.display()),
+        )
+        .unwrap();
+
+        let info = detect_repo_info(&worktree_dir).expect("should detect repo info");
+        match info {
+            RepoInfo::NormalRepoWorktree { repo_path, branch } => {
+                assert_eq!(repo_path, repo);
+                assert_eq!(branch, "feature");
+            }
+            other => panic!("Expected NormalRepoWorktree, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detect_bare_repo_root() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a bare repo that also has a .git dir (some bare repos do)
+        let bare_repo = dir.path().join("myrepo.git");
+        std::fs::create_dir_all(bare_repo.join(".git")).unwrap();
+        std::fs::create_dir_all(bare_repo.join("refs")).unwrap();
+        std::fs::write(bare_repo.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let info = detect_repo_info(&bare_repo).expect("should detect repo info");
+        match info {
+            RepoInfo::BareRepo { repo_path } => {
+                assert_eq!(repo_path, bare_repo);
+            }
+            other => panic!("Expected BareRepo, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detect_normal_repo_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("myrepo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+        let info = detect_repo_info(&repo).expect("should detect repo info");
+        match info {
+            RepoInfo::NormalRepo { repo_path } => {
+                assert_eq!(repo_path, repo);
+            }
+            other => panic!("Expected NormalRepo, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detect_returns_none_for_non_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-repo");
+        std::fs::create_dir_all(&path).unwrap();
+
+        assert!(detect_repo_info(&path).is_none());
+    }
 }

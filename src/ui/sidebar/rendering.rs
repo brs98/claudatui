@@ -15,7 +15,7 @@ use crate::claude::grouping::ConversationGroup;
 
 use super::items::{
     conv_matches_filter, group_has_active_content, is_hidden_plan_implementation,
-    project_has_active_content, should_show_conversation,
+    project_has_active_content, should_show_conversation, visible_group_count,
 };
 use super::{ArchiveFilter, ControlAction, SectionKind, SidebarContext, SidebarState, PAGE_SIZE};
 
@@ -254,7 +254,10 @@ fn build_list_items(
         // Render "Other" section if there are non-workspace groups
         if !all_other_groups.is_empty() {
             let other_projects = group_by_project(&all_other_groups);
-            let total_group_count: usize = other_projects.iter().map(|(_, _, g)| g.len()).sum();
+            let total_group_count: usize = other_projects
+                .iter()
+                .map(|(_, _, g)| visible_group_count(g, ctx))
+                .sum();
 
             // When hide_inactive is on, only show OtherHeader if at least one
             // "other" group has active content.
@@ -453,14 +456,23 @@ fn render_groups_list_with_limit(
     has_text_filter: bool,
     indent_offset: usize,
 ) {
-    let total = groups.len();
+    let filtered_groups: Vec<&ConversationGroup> = if ctx.hide_inactive {
+        groups
+            .iter()
+            .copied()
+            .filter(|g| group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions))
+            .collect()
+    } else {
+        groups.to_vec()
+    };
+    let total = filtered_groups.len();
     let vis = if has_text_filter {
         total
     } else {
         SidebarState::visible_count(visible_groups, project_key).min(total)
     };
 
-    for group in &groups[..vis] {
+    for group in filtered_groups.iter().take(vis) {
         render_group_list_items(
             items,
             current_index,

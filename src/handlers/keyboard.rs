@@ -3,7 +3,7 @@ use std::time::Instant;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{self, App, ChordState, EscapeSequenceState, Focus};
+use crate::app::{self, App, ChordState, EscapeSequenceState, Focus, SplitMode, TerminalPaneId};
 use crate::input::which_key::{LeaderAction, LeaderKeyResult};
 use crate::input::InputMode;
 use crate::ui::sidebar::FilterKeyResult;
@@ -134,6 +134,11 @@ pub(crate) fn handle_key_event(
     // 2. Leader mode (works in both sidebar and terminal focus)
     if let InputMode::Leader(ref _state) = app.input_mode {
         return handle_leader_key(app, key);
+    }
+
+    // 2.5. Mosaic mode — intercept before normal/sidebar handlers
+    if app.split_mode == SplitMode::Mosaic && app.focus == Focus::Mosaic {
+        return handle_mosaic_key(app, key);
     }
 
     // 3. Normal-mode keybindings (Ctrl+Q handled above in true globals)
@@ -295,6 +300,9 @@ pub(crate) fn execute_leader_action(app: &mut App, action: LeaderAction) -> Resu
         LeaderAction::ManageWorkspaces => {
             app.open_workspace_modal();
         }
+        LeaderAction::ToggleMosaic => {
+            app.toggle_mosaic_view();
+        }
     }
     Ok(())
 }
@@ -448,6 +456,85 @@ pub(crate) fn flush_buffered_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Handle key input while the mosaic grid view is focused.
+pub(crate) fn handle_mosaic_key(app: &mut App, key: KeyEvent) -> Result<KeyAction> {
+    let count = app.mosaic_state_cache.len();
+    if count == 0 {
+        // No sessions — only Esc/m/q are meaningful
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('m') => {
+                app.toggle_mosaic_view();
+            }
+            KeyCode::Char('q') => return Ok(KeyAction::Quit),
+            KeyCode::Char(' ') => {
+                app.enter_leader_mode();
+            }
+            _ => {}
+        }
+        return Ok(KeyAction::Continue);
+    }
+
+    let (_row, col, cols) = crate::ui::mosaic::grid_position(count, app.mosaic_selected);
+
+    match key.code {
+        // Horizontal navigation
+        KeyCode::Char('h') | KeyCode::Left => {
+            if col > 0 {
+                app.mosaic_selected -= 1;
+            }
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            if app.mosaic_selected + 1 < count {
+                let next_col = (app.mosaic_selected + 1) % cols;
+                if next_col > col {
+                    app.mosaic_selected += 1;
+                }
+            }
+        }
+        // Vertical navigation
+        KeyCode::Char('j') | KeyCode::Down => {
+            let target = app.mosaic_selected + cols;
+            if target < count {
+                app.mosaic_selected = target;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if app.mosaic_selected >= cols {
+                app.mosaic_selected -= cols;
+            }
+        }
+        // Zoom into selected session
+        KeyCode::Enter => {
+            if let Some((sid, _, _)) = app.mosaic_state_cache.get(app.mosaic_selected) {
+                let sid = sid.clone();
+                app.active_session_id = Some(sid);
+                app.split_mode = SplitMode::None;
+                app.focus = Focus::Terminal(TerminalPaneId::Primary);
+                app.input_mode = InputMode::Insert;
+                app.escape_seq_state = EscapeSequenceState::None;
+                app.mosaic_state_cache.clear();
+            }
+        }
+        // Exit mosaic
+        KeyCode::Esc | KeyCode::Char('m') => {
+            app.toggle_mosaic_view();
+        }
+        // Enter leader mode from mosaic
+        KeyCode::Char(' ') => {
+            app.enter_leader_mode();
+        }
+        // Quit
+        KeyCode::Char('q') => return Ok(KeyAction::Quit),
+        // Toggle help
+        KeyCode::Char('?') => {
+            app.help_menu_open = !app.help_menu_open;
+        }
+        _ => {}
+    }
+
+    Ok(KeyAction::Continue)
 }
 
 pub(crate) fn handle_sidebar_key_normal(app: &mut App, key: KeyEvent) -> Result<KeyAction> {

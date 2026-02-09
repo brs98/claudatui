@@ -102,15 +102,18 @@ pub enum SplitMode {
     Horizontal,
     /// Stacked (top/bottom)
     Vertical,
+    /// All active PTY sessions in a dynamic grid
+    Mosaic,
 }
 
 impl SplitMode {
-    /// Cycle to the next split mode (None -> Horizontal -> Vertical -> None)
+    /// Cycle to the next split mode (None -> Horizontal -> Vertical -> None).
+    /// Mosaic is intentionally excluded — it has its own toggle.
     pub fn cycle(&self) -> Self {
         match self {
             SplitMode::None => SplitMode::Horizontal,
             SplitMode::Horizontal => SplitMode::Vertical,
-            SplitMode::Vertical => SplitMode::None,
+            SplitMode::Vertical | SplitMode::Mosaic => SplitMode::None,
         }
     }
 }

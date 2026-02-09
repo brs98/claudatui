@@ -813,6 +813,77 @@ impl App {
         }
     }
 
+    /// Get ordered list of active PTY session IDs (sorted for stable display).
+    pub fn active_pty_session_ids_ordered(&self) -> Vec<String> {
+        let mut ids = self.session_manager.session_ids();
+        ids.sort();
+        ids
+    }
+
+    /// Update the mosaic state cache from active PTY sessions.
+    /// No-ops when not in mosaic mode.
+    pub fn update_mosaic_state_cache(&mut self) {
+        if self.split_mode != SplitMode::Mosaic {
+            return;
+        }
+
+        let ids = self.active_pty_session_ids_ordered();
+        self.mosaic_state_cache = ids
+            .iter()
+            .filter_map(|sid| {
+                let state = self.session_manager.get_session_state(sid)?;
+                let name = self.session_display_name(sid);
+                Some((sid.clone(), name, state))
+            })
+            .collect();
+
+        // Clamp selection if sessions were removed
+        if !self.mosaic_state_cache.is_empty() {
+            self.mosaic_selected = self.mosaic_selected.min(self.mosaic_state_cache.len() - 1);
+        } else {
+            self.mosaic_selected = 0;
+        }
+    }
+
+    /// Derive a human-readable label for a session (used in mosaic pane titles).
+    pub fn session_display_name(&self, session_id: &str) -> String {
+        // Check ephemeral sessions first
+        if let Some(eph) = self.ephemeral_sessions.get(session_id) {
+            if let Some(name) = eph.project_path.file_name() {
+                return name.to_string_lossy().to_string();
+            }
+        }
+
+        // Check session_to_claude_id -> find conversation in groups
+        if let Some(Some(claude_id)) = self.session_to_claude_id.get(session_id) {
+            for group in &self.groups {
+                for conv in group.conversations() {
+                    if conv.session_id == *claude_id {
+                        if let Some(name) = conv.project_path.file_name() {
+                            return name.to_string_lossy().to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback to session ID
+        session_id.to_string()
+    }
+
+    /// Toggle mosaic view on/off.
+    pub fn toggle_mosaic_view(&mut self) {
+        if self.split_mode == SplitMode::Mosaic {
+            self.split_mode = SplitMode::None;
+            self.focus = Focus::Sidebar;
+            self.mosaic_state_cache.clear();
+        } else {
+            self.split_mode = SplitMode::Mosaic;
+            self.focus = Focus::Mosaic;
+            self.mosaic_selected = 0;
+        }
+    }
+
     /// Resize all sessions to match current layout config
     pub(crate) fn resize_sessions_to_layout(&mut self) {
         let (rows, cols) = self.calculate_terminal_dimensions();
