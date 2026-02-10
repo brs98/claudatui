@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 use crate::app::EphemeralSession;
 use crate::claude::grouping::ConversationGroup;
 
-use super::{ArchiveFilter, ControlAction, SectionKind, SidebarContext, SidebarItem, SidebarState};
+use super::{
+    ArchiveFilter, ControlAction, SectionKind, SidebarContext, SidebarItem, SidebarState, PAGE_SIZE,
+};
 
 /// Build a flat list of sidebar items for navigation.
 pub fn build_sidebar_items(
@@ -280,7 +282,7 @@ fn render_groups_with_limit(
     }
 
     // Emit section controls for groups (only when not filtering)
-    if !has_text_filter {
+    if !has_text_filter && total > PAGE_SIZE {
         let hidden = total.saturating_sub(vis);
         let is_expanded = visible_groups.contains_key(project_key);
 
@@ -290,18 +292,22 @@ fn render_groups_with_limit(
                 kind: SectionKind::Groups,
                 action: ControlAction::ShowMore(hidden),
             });
-            items.push(SidebarItem::SectionControl {
-                key: project_key.to_string(),
-                kind: SectionKind::Groups,
-                action: ControlAction::ShowAll(total),
-            });
+            if hidden > PAGE_SIZE {
+                items.push(SidebarItem::SectionControl {
+                    key: project_key.to_string(),
+                    kind: SectionKind::Groups,
+                    action: ControlAction::ShowAll(total),
+                });
+            }
         }
-        if is_expanded {
-            items.push(SidebarItem::SectionControl {
-                key: project_key.to_string(),
-                kind: SectionKind::Groups,
-                action: ControlAction::ShowFewer,
-            });
+        if is_expanded && hidden == 0 {
+            if vis > 2 * PAGE_SIZE {
+                items.push(SidebarItem::SectionControl {
+                    key: project_key.to_string(),
+                    kind: SectionKind::Groups,
+                    action: ControlAction::ShowFewer,
+                });
+            }
             items.push(SidebarItem::SectionControl {
                 key: project_key.to_string(),
                 kind: SectionKind::Groups,
@@ -425,7 +431,7 @@ fn render_group_items(
         }
 
         // Emit section controls for conversations (only when not filtering)
-        if !has_text_filter {
+        if !has_text_filter && total > PAGE_SIZE {
             let hidden = total.saturating_sub(vis);
             let is_expanded = visible_conversations.contains_key(&group_key);
 
@@ -435,18 +441,22 @@ fn render_group_items(
                     kind: SectionKind::Conversations,
                     action: ControlAction::ShowMore(hidden),
                 });
-                items.push(SidebarItem::SectionControl {
-                    key: group_key.clone(),
-                    kind: SectionKind::Conversations,
-                    action: ControlAction::ShowAll(total),
-                });
+                if hidden > PAGE_SIZE {
+                    items.push(SidebarItem::SectionControl {
+                        key: group_key.clone(),
+                        kind: SectionKind::Conversations,
+                        action: ControlAction::ShowAll(total),
+                    });
+                }
             }
-            if is_expanded {
-                items.push(SidebarItem::SectionControl {
-                    key: group_key.clone(),
-                    kind: SectionKind::Conversations,
-                    action: ControlAction::ShowFewer,
-                });
+            if is_expanded && hidden == 0 {
+                if vis > 2 * PAGE_SIZE {
+                    items.push(SidebarItem::SectionControl {
+                        key: group_key.clone(),
+                        kind: SectionKind::Conversations,
+                        action: ControlAction::ShowFewer,
+                    });
+                }
                 items.push(SidebarItem::SectionControl {
                     key: group_key.clone(),
                     kind: SectionKind::Conversations,

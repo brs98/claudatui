@@ -489,7 +489,7 @@ fn render_groups_list_with_limit(
     }
 
     // Emit section controls for groups (only when not filtering)
-    if !has_text_filter {
+    if !has_text_filter && total > PAGE_SIZE {
         let hidden = total.saturating_sub(vis);
         let is_expanded = visible_groups.contains_key(project_key);
         let indent = " ".repeat(indent_offset);
@@ -503,24 +503,28 @@ fn render_groups_list_with_limit(
                 &ControlAction::ShowMore(hidden),
                 SectionKind::Groups,
             );
-            render_section_control(
-                items,
-                current_index,
-                selected_index,
-                &indent,
-                &ControlAction::ShowAll(total),
-                SectionKind::Groups,
-            );
+            if hidden > PAGE_SIZE {
+                render_section_control(
+                    items,
+                    current_index,
+                    selected_index,
+                    &indent,
+                    &ControlAction::ShowAll(total),
+                    SectionKind::Groups,
+                );
+            }
         }
-        if is_expanded {
-            render_section_control(
-                items,
-                current_index,
-                selected_index,
-                &indent,
-                &ControlAction::ShowFewer,
-                SectionKind::Groups,
-            );
+        if is_expanded && hidden == 0 {
+            if vis > 2 * PAGE_SIZE {
+                render_section_control(
+                    items,
+                    current_index,
+                    selected_index,
+                    &indent,
+                    &ControlAction::ShowFewer,
+                    SectionKind::Groups,
+                );
+            }
             render_section_control(
                 items,
                 current_index,
@@ -708,7 +712,7 @@ fn render_group_list_items(
         }
 
         // Emit section controls for conversations (only when not filtering)
-        if !has_text_filter {
+        if !has_text_filter && total > PAGE_SIZE {
             let hidden = total.saturating_sub(vis);
             let is_expanded = visible_conversations.contains_key(&group_key);
 
@@ -721,24 +725,28 @@ fn render_group_list_items(
                     &ControlAction::ShowMore(hidden),
                     SectionKind::Conversations,
                 );
-                render_section_control(
-                    items,
-                    current_index,
-                    selected_index,
-                    &conv_indent,
-                    &ControlAction::ShowAll(total),
-                    SectionKind::Conversations,
-                );
+                if hidden > PAGE_SIZE {
+                    render_section_control(
+                        items,
+                        current_index,
+                        selected_index,
+                        &conv_indent,
+                        &ControlAction::ShowAll(total),
+                        SectionKind::Conversations,
+                    );
+                }
             }
-            if is_expanded {
-                render_section_control(
-                    items,
-                    current_index,
-                    selected_index,
-                    &conv_indent,
-                    &ControlAction::ShowFewer,
-                    SectionKind::Conversations,
-                );
+            if is_expanded && hidden == 0 {
+                if vis > 2 * PAGE_SIZE {
+                    render_section_control(
+                        items,
+                        current_index,
+                        selected_index,
+                        &conv_indent,
+                        &ControlAction::ShowFewer,
+                        SectionKind::Conversations,
+                    );
+                }
                 render_section_control(
                     items,
                     current_index,
@@ -767,9 +775,10 @@ fn render_section_control(
     };
     let label = match action {
         ControlAction::ShowMore(hidden) => {
+            let show_count = PAGE_SIZE.min(*hidden);
             format!(
                 "{}\u{25bc} Show {} more{}  ({} hidden)",
-                indent, PAGE_SIZE, kind_label, hidden
+                indent, show_count, kind_label, hidden
             )
         }
         ControlAction::ShowAll(total) => {
