@@ -237,6 +237,12 @@ pub struct App {
     /// Used to detect stale Active status: if the file hasn't grown since resume,
     /// Claude hasn't actually started processing yet, so override Active → WaitingForInput.
     resume_jsonl_sizes: HashMap<String, u64>,
+    /// JSONL file sizes from the previous poll cycle, keyed by Claude session ID.
+    /// Used to detect file growth between polls.
+    prev_jsonl_sizes: HashMap<String, u64>,
+    /// When the JSONL file last grew for each session. Used to debounce
+    /// WaitingForInput detection — only trust it after a settle period.
+    last_jsonl_growth: HashMap<String, Instant>,
     /// Whether the help menu overlay is open (toggled by '?')
     pub help_menu_open: bool,
     /// Index of the selected pane in mosaic grid view
@@ -306,6 +312,8 @@ impl App {
             terminal_inner_area: None,
             last_live_status_poll: None,
             resume_jsonl_sizes: HashMap::new(),
+            prev_jsonl_sizes: HashMap::new(),
+            last_jsonl_growth: HashMap::new(),
             help_menu_open: false,
             mosaic_selected: 0,
             mosaic_state_cache: Vec::new(),

@@ -132,7 +132,9 @@ pub fn detect_status_fast(path: &Path) -> Result<ConversationStatus> {
         }
         // User just sent a message — Claude should be processing
         Some("user") => ConversationStatus::Active,
-        // Claude wrote a response — ball is with the user (or a tool is executing)
+        // Claude wrote a response — treat as waiting; the debounced growth check
+        // in refresh_session_status() overrides this to Active when the file is
+        // still growing (meaning Claude is mid-agentic-loop).
         Some("assistant") => ConversationStatus::WaitingForInput,
         _ => ConversationStatus::Idle,
     })
@@ -226,7 +228,7 @@ mod tests {
                 r#"{"type":"progress","data":{"tool":"bash"}}"#,
             ],
         );
-        // Last non-progress entry is "assistant" → WaitingForInput
+        // Last non-progress entry is "assistant" → WaitingForInput (debounce handles active case)
         assert_eq!(
             detect_status_fast(&p).unwrap(),
             ConversationStatus::WaitingForInput

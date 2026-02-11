@@ -506,6 +506,8 @@ impl App {
             if let Some(Some(ref cid)) = claude_id {
                 // Clean up resume baseline — session is dead, no need to track
                 self.resume_jsonl_sizes.remove(cid.as_str());
+                self.prev_jsonl_sizes.remove(cid.as_str());
+                self.last_jsonl_growth.remove(cid.as_str());
                 self.refresh_session_status(cid);
             }
 
@@ -572,6 +574,32 @@ impl App {
                     } else {
                         // File grew — Claude is actually processing, clear baseline
                         self.resume_jsonl_sizes.remove(session_id);
+                    }
+                }
+            }
+
+            // Debounced file-growth detection: only trust WaitingForInput after
+            // the JSONL file has stopped growing for SETTLE_DURATION. During
+            // agentic loops, turn_duration/summary entries appear mid-loop ~25%
+            // of the time, causing false WaitingForInput. File growth is the
+            // ground truth for active work.
+            const SETTLE_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
+
+            let current_size =
+                std::fs::metadata(&conv_path).map(|m| m.len()).unwrap_or(0);
+            if let Some(&prev_size) = self.prev_jsonl_sizes.get(session_id) {
+                if current_size > prev_size {
+                    self.last_jsonl_growth
+                        .insert(session_id.to_string(), Instant::now());
+                }
+            }
+            self.prev_jsonl_sizes
+                .insert(session_id.to_string(), current_size);
+
+            if status == ConversationStatus::WaitingForInput {
+                if let Some(last_growth) = self.last_jsonl_growth.get(session_id) {
+                    if last_growth.elapsed() < SETTLE_DURATION {
+                        status = ConversationStatus::Active;
                     }
                 }
             }
@@ -736,9 +764,11 @@ impl App {
     /// Close a session by its ID, cleaning up all associated state
     pub fn close_session(&mut self, session_id: &str) {
         self.session_manager.close_session(session_id);
-        // Clean up resume baseline before removing the claude ID mapping
+        // Clean up tracking state before removing the claude ID mapping
         if let Some(Some(claude_id)) = self.session_to_claude_id.get(session_id) {
             self.resume_jsonl_sizes.remove(claude_id.as_str());
+            self.prev_jsonl_sizes.remove(claude_id.as_str());
+            self.last_jsonl_growth.remove(claude_id.as_str());
         }
         self.session_to_claude_id.remove(session_id);
         self.ephemeral_sessions.remove(session_id);
