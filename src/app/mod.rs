@@ -16,7 +16,7 @@ use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 
 use crate::claude::archive::ArchiveManager;
-use crate::claude::conversation::{detect_status_fast, Conversation, ConversationStatus};
+use crate::claude::conversation::Conversation;
 use crate::claude::grouping::{
     group_conversations, group_conversations_unordered, order_groups_by_keys,
     retain_existing_groups, ConversationGroup,
@@ -231,18 +231,6 @@ pub struct App {
     pub text_selection: Option<TextSelection>,
     /// Cached inner area of terminal pane (set during render, used for mouse coordinate mapping)
     pub terminal_inner_area: Option<Rect>,
-    /// Last time we polled JSONL status for running sessions
-    last_live_status_poll: Option<Instant>,
-    /// JSONL file sizes recorded at session resume time.
-    /// Used to detect stale Active status: if the file hasn't grown since resume,
-    /// Claude hasn't actually started processing yet, so override Active → WaitingForInput.
-    resume_jsonl_sizes: HashMap<String, u64>,
-    /// JSONL file sizes from the previous poll cycle, keyed by Claude session ID.
-    /// Used to detect file growth between polls.
-    prev_jsonl_sizes: HashMap<String, u64>,
-    /// When the JSONL file last grew for each session. Used to debounce
-    /// WaitingForInput detection — only trust it after a settle period.
-    last_jsonl_growth: HashMap<String, Instant>,
     /// Whether the help menu overlay is open (toggled by '?')
     pub help_menu_open: bool,
     /// Index of the selected pane in mosaic grid view
@@ -310,10 +298,6 @@ impl App {
             escape_seq_state: EscapeSequenceState::None,
             text_selection: None,
             terminal_inner_area: None,
-            last_live_status_poll: None,
-            resume_jsonl_sizes: HashMap::new(),
-            prev_jsonl_sizes: HashMap::new(),
-            last_jsonl_growth: HashMap::new(),
             help_menu_open: false,
             mosaic_selected: 0,
             mosaic_state_cache: Vec::new(),
@@ -355,14 +339,6 @@ impl App {
         sessions
             .into_iter()
             .map(|session| {
-                // Check conversation file for status using the full path
-                let conv_path = PathBuf::from(&session.full_path);
-                let status = if conv_path.exists() {
-                    detect_status_fast(&conv_path).unwrap_or(ConversationStatus::Idle)
-                } else {
-                    ConversationStatus::Idle
-                };
-
                 // Detect plan implementation conversations by checking first_prompt
                 let is_plan_implementation = session
                     .first_prompt
@@ -391,7 +367,6 @@ impl App {
                     timestamp: session.file_mtime,
                     modified: session.modified,
                     project_path: PathBuf::from(&session.project_path),
-                    status,
                     message_count: session.message_count,
                     git_branch: session.git_branch,
                     is_plan_implementation,

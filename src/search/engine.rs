@@ -155,7 +155,7 @@ impl SearchEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claude::conversation::{Conversation, ConversationStatus};
+    use crate::claude::conversation::Conversation;
 
     fn make_conversation(
         session_id: &str,
@@ -170,7 +170,6 @@ mod tests {
             timestamp: 1000,
             modified: "2026-01-01T00:00:00Z".to_string(),
             project_path: PathBuf::from(project_path),
-            status: ConversationStatus::Idle,
             message_count: 1,
             git_branch: None,
             is_plan_implementation: false,

@@ -406,7 +406,7 @@ impl App {
             }
         }
 
-        let Some((group_key, conv_idx, mut conv)) = target else {
+        let Some((group_key, conv_idx, conv)) = target else {
             self.toast_error("Conversation not found");
             return Ok(false);
         };
@@ -461,12 +461,6 @@ impl App {
             self.active_session_id = Some(sid);
         } else {
             self.start_session(&project_path, Some(session_id))?;
-            self.record_resume_jsonl_size(session_id, &project_path);
-            self.update_conversation_status_in_groups(
-                session_id,
-                ConversationStatus::WaitingForInput,
-            );
-            conv.status = ConversationStatus::WaitingForInput;
         }
         self.selected_conversation = Some(conv);
         self.focus = Focus::Terminal(TerminalPaneId::Primary);

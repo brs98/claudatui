@@ -385,7 +385,7 @@ pub fn order_groups_by_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claude::conversation::{Conversation, ConversationStatus};
+    use crate::claude::conversation::Conversation;
 
     fn make_conversation(project_path: &str, timestamp: i64) -> Conversation {
         Conversation {
@@ -395,7 +395,6 @@ mod tests {
             timestamp,
             modified: format!("2024-01-01T00:00:{}Z", timestamp),
             project_path: PathBuf::from(project_path),
-            status: ConversationStatus::Idle,
             message_count: 1,
             git_branch: None,
             is_plan_implementation: false,

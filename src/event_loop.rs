@@ -77,9 +77,6 @@ pub fn run_app(
         // Check all sessions for dead PTYs and clean up
         app.check_all_session_status();
 
-        // Poll JSONL status for running sessions (~1s throttle)
-        app.poll_running_session_statuses();
-
         // Check for sessions-index.json changes and reload if needed
         app.check_sessions_updates();
 

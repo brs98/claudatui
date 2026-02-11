@@ -90,9 +90,6 @@ impl App {
     /// 1. Ephemeral sessions (new conversations not yet persisted)
     /// 2. Running conversations (have active PTYs)
     ///
-    /// Only trusts live PTY state — does NOT fall back to JSONL-based `conv.status`,
-    /// which can be stale when Claude exits externally.
-    ///
     /// Returns the sidebar item index and session info if found.
     fn find_active_session_in_group(&self, group_key: &str) -> Option<ActiveSessionInfo> {
         let items = self.sidebar_items();
@@ -344,14 +341,6 @@ impl App {
                     } else {
                         // Start new session with --resume
                         self.start_session(&conversation.project_path, Some(&claude_session_id))?;
-                        self.record_resume_jsonl_size(
-                            &claude_session_id,
-                            &conversation.project_path,
-                        );
-                        self.update_conversation_status_in_groups(
-                            &claude_session_id,
-                            ConversationStatus::WaitingForInput,
-                        );
                     }
                     self.focus = Focus::Terminal(TerminalPaneId::Primary);
                     self.enter_insert_mode();

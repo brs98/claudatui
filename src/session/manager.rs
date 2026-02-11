@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
@@ -48,9 +47,6 @@ pub struct ManagedSession {
     pub scroll_offset: usize,
     /// Whether scroll is locked.
     pub scroll_locked: bool,
-    /// When PTY output was last received. Used by the status debounce to
-    /// detect active work even when JSONL isn't growing (e.g. tool execution).
-    pub last_output_time: Option<Instant>,
 }
 
 impl ManagedSession {
@@ -136,7 +132,6 @@ impl ManagedSession {
             cols,
             scroll_offset: 0,
             scroll_locked: false,
-            last_output_time: None,
         })
     }
 
@@ -152,10 +147,6 @@ impl ManagedSession {
         while let Ok(data) = self.output_rx.try_recv() {
             self.vt_parser.process(&data);
             had_output = true;
-        }
-
-        if had_output {
-            self.last_output_time = Some(Instant::now());
         }
 
         // Auto-scroll to bottom when new output arrives, unless scroll is locked
@@ -309,11 +300,6 @@ impl SessionManager {
     /// Get the session state for rendering.
     pub fn get_session_state(&self, session_id: &str) -> Option<SessionState> {
         self.sessions.get(session_id).map(ManagedSession::state)
-    }
-
-    /// Get the last PTY output time for a session.
-    pub fn last_output_time(&self, session_id: &str) -> Option<Instant> {
-        self.sessions.get(session_id).and_then(|s| s.last_output_time)
     }
 
     /// Process output for all sessions.

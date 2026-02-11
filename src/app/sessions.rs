@@ -37,7 +37,7 @@ impl App {
                     }
                 }
 
-                if let Some((path, claude_session_id, mut conv)) = target {
+                if let Some((path, claude_session_id, conv)) = target {
                     // Check if the working directory still exists
                     if !path.exists() {
                         // Directory was deleted (e.g., git worktree removed)
@@ -58,18 +58,6 @@ impl App {
                     } else {
                         // Start new session with --resume
                         self.start_session(&path, Some(&claude_session_id))?;
-
-                        // Record JSONL file size at resume time so we can detect
-                        // stale Active status (file hasn't grown = Claude hasn't
-                        // started processing yet)
-                        self.record_resume_jsonl_size(&claude_session_id, &path);
-
-                        // Force status to WaitingForInput until Claude actually writes
-                        self.update_conversation_status_in_groups(
-                            &claude_session_id,
-                            ConversationStatus::WaitingForInput,
-                        );
-                        conv.status = ConversationStatus::WaitingForInput;
                     }
                     self.selected_conversation = Some(conv);
                     self.focus = Focus::Terminal(TerminalPaneId::Primary);
@@ -328,10 +316,6 @@ impl App {
     }
 
     /// Check if a specific conversation has an active PTY session.
-    ///
-    /// This is the **only reliable** way to determine if a conversation is active.
-    /// Do NOT use `conv.status` (JSONL-based) for activeness guards — it can be
-    /// stale when Claude exits externally without writing a final status entry.
     pub fn is_conversation_running(&self, session_id: &str) -> bool {
         self.session_to_claude_id
             .values()
@@ -456,22 +440,6 @@ impl App {
         (rows, cols)
     }
 
-    /// Update the status of a conversation in the groups vector
-    pub(crate) fn update_conversation_status_in_groups(
-        &mut self,
-        session_id: &str,
-        status: ConversationStatus,
-    ) {
-        for group in &mut self.groups {
-            for conv in group.conversations_mut() {
-                if conv.session_id == session_id {
-                    conv.status = status;
-                    return;
-                }
-            }
-        }
-    }
-
     /// Check all sessions for dead PTYs and clean up
     pub fn check_all_session_status(&mut self) {
         // Clean up dead sessions from the session manager
@@ -496,20 +464,10 @@ impl App {
         }
 
         for session_id in dead_sessions {
-            // Get the Claude session ID before removing from our mapping
-            let claude_id = self.session_to_claude_id.remove(&session_id);
+            self.session_to_claude_id.remove(&session_id);
 
             // Remove from ephemeral sessions if present
             self.ephemeral_sessions.remove(&session_id);
-
-            // Re-read conversation status from file
-            if let Some(Some(ref cid)) = claude_id {
-                // Clean up resume baseline — session is dead, no need to track
-                self.resume_jsonl_sizes.remove(cid.as_str());
-                self.prev_jsonl_sizes.remove(cid.as_str());
-                self.last_jsonl_growth.remove(cid.as_str());
-                self.refresh_session_status(cid);
-            }
 
             // Clear preview if the dead session was being previewed
             if self.preview_session_id.as_ref() == Some(&session_id) {
@@ -526,156 +484,6 @@ impl App {
                     self.focus = Focus::Sidebar;
                 }
             }
-        }
-    }
-
-    /// Refresh status of a session from its conversation file
-    fn refresh_session_status(&mut self, session_id: &str) {
-        // Skip temp session IDs (new sessions that haven't been persisted yet)
-        if session_id.starts_with("__new_session_") {
-            return;
-        }
-
-        // Find the conversation to get its project path
-        let mut conv_info: Option<PathBuf> = None;
-        for group in &self.groups {
-            for conv in group.conversations() {
-                if conv.session_id == session_id {
-                    conv_info = Some(conv.project_path.clone());
-                    break;
-                }
-            }
-        }
-
-        if let Some(project_path) = conv_info {
-            // Build the conversation file path using escaped project path
-            let escaped_path = project_path.to_string_lossy().replace('/', "-");
-            let conv_path = self
-                .claude_dir
-                .join("projects")
-                .join(&escaped_path)
-                .join(format!("{}.jsonl", session_id));
-
-            let mut status = if conv_path.exists() {
-                detect_status_fast(&conv_path).unwrap_or(ConversationStatus::Idle)
-            } else {
-                ConversationStatus::Idle
-            };
-
-            // If we have a resume baseline for this session, check whether the
-            // JSONL file has actually grown. If not, Claude hasn't started
-            // processing yet — override Active → WaitingForInput.
-            if status == ConversationStatus::Active {
-                if let Some(&baseline_size) = self.resume_jsonl_sizes.get(session_id) {
-                    let current_size = std::fs::metadata(&conv_path).map(|m| m.len()).unwrap_or(0);
-                    if current_size <= baseline_size {
-                        // File hasn't grown — Claude hasn't started yet
-                        status = ConversationStatus::WaitingForInput;
-                    } else {
-                        // File grew — Claude is actually processing, clear baseline
-                        self.resume_jsonl_sizes.remove(session_id);
-                    }
-                }
-            }
-
-            // Debounced file-growth detection: only trust WaitingForInput after
-            // the JSONL file has stopped growing for SETTLE_DURATION. During
-            // agentic loops, turn_duration/summary entries appear mid-loop ~25%
-            // of the time, causing false WaitingForInput. File growth is the
-            // ground truth for active work.
-            const SETTLE_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
-
-            let current_size =
-                std::fs::metadata(&conv_path).map(|m| m.len()).unwrap_or(0);
-            if let Some(&prev_size) = self.prev_jsonl_sizes.get(session_id) {
-                if current_size > prev_size {
-                    self.last_jsonl_growth
-                        .insert(session_id.to_string(), Instant::now());
-                }
-            }
-            self.prev_jsonl_sizes
-                .insert(session_id.to_string(), current_size);
-
-            // Reverse-lookup: find the PTY session ID for this Claude session ID
-            // so we can query the session manager for PTY output activity.
-            let pty_session_id: Option<String> = self
-                .session_to_claude_id
-                .iter()
-                .find(|(_, cid)| cid.as_deref() == Some(session_id))
-                .map(|(sid, _)| sid.clone());
-
-            if status == ConversationStatus::WaitingForInput {
-                let jsonl_recent = self
-                    .last_jsonl_growth
-                    .get(session_id)
-                    .is_some_and(|t| t.elapsed() < SETTLE_DURATION);
-
-                let pty_recent = pty_session_id
-                    .as_deref()
-                    .and_then(|pid| self.session_manager.last_output_time(pid))
-                    .is_some_and(|t| t.elapsed() < SETTLE_DURATION);
-
-                if jsonl_recent || pty_recent {
-                    status = ConversationStatus::Active;
-                }
-            }
-
-            self.update_conversation_status_in_groups(session_id, status);
-
-            // Update selected_conversation if it matches
-            if let Some(ref mut conv) = self.selected_conversation {
-                if conv.session_id == session_id {
-                    conv.status = status;
-                }
-            }
-        }
-    }
-
-    /// Record the current JSONL file size for a session being resumed.
-    /// This lets us detect stale Active status when `detect_status_fast` reads
-    /// old data before Claude has started processing the resumed session.
-    pub(crate) fn record_resume_jsonl_size(
-        &mut self,
-        claude_session_id: &str,
-        project_path: &std::path::Path,
-    ) {
-        let escaped = project_path.to_string_lossy().replace('/', "-");
-        let jsonl_path = self
-            .claude_dir
-            .join("projects")
-            .join(&escaped)
-            .join(format!("{}.jsonl", claude_session_id));
-
-        if let Ok(meta) = std::fs::metadata(&jsonl_path) {
-            self.resume_jsonl_sizes
-                .insert(claude_session_id.to_string(), meta.len());
-        }
-    }
-
-    /// Poll JSONL status for all running sessions (throttled to ~1s intervals).
-    ///
-    /// For each session with a known Claude ID, re-reads the tail of the JSONL
-    /// transcript to detect whether Claude is actively working or waiting for input.
-    /// Ephemeral sessions (no Claude ID yet) are skipped — they default to Active.
-    pub fn poll_running_session_statuses(&mut self) {
-        const POLL_INTERVAL_MS: u128 = 1000;
-
-        if let Some(last) = self.last_live_status_poll {
-            if last.elapsed().as_millis() < POLL_INTERVAL_MS {
-                return;
-            }
-        }
-        self.last_live_status_poll = Some(Instant::now());
-
-        // Collect Claude IDs for running sessions to avoid borrow conflict
-        let claude_ids: Vec<String> = self
-            .session_to_claude_id
-            .values()
-            .filter_map(Clone::clone)
-            .collect();
-
-        for claude_id in claude_ids {
-            self.refresh_session_status(&claude_id);
         }
     }
 
@@ -780,12 +588,6 @@ impl App {
     /// Close a session by its ID, cleaning up all associated state
     pub fn close_session(&mut self, session_id: &str) {
         self.session_manager.close_session(session_id);
-        // Clean up tracking state before removing the claude ID mapping
-        if let Some(Some(claude_id)) = self.session_to_claude_id.get(session_id) {
-            self.resume_jsonl_sizes.remove(claude_id.as_str());
-            self.prev_jsonl_sizes.remove(claude_id.as_str());
-            self.last_jsonl_growth.remove(claude_id.as_str());
-        }
         self.session_to_claude_id.remove(session_id);
         self.ephemeral_sessions.remove(session_id);
 

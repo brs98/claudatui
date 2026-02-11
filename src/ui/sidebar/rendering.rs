@@ -10,7 +10,6 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, StatefulWidget, Widget},
 };
 
-use crate::claude::conversation::ConversationStatus;
 use crate::claude::grouping::ConversationGroup;
 
 use super::items::{
@@ -667,16 +666,7 @@ fn render_group_list_items(
             // regardless of the file-based status
             let is_running = ctx.running_sessions.contains(&conv.session_id);
             let (status_indicator, archive_indicator) = if is_running {
-                // Use live-polled conv.status for running sessions
-                let indicator = match conv.status {
-                    ConversationStatus::Active => {
-                        Span::styled("\u{25cf} ", Style::default().fg(Color::Green))
-                    }
-                    ConversationStatus::WaitingForInput | ConversationStatus::Idle => {
-                        Span::styled("\u{25d0} ", Style::default().fg(Color::Yellow))
-                    }
-                };
-                (indicator, None)
+                (Span::styled("\u{25cf} ", Style::default().fg(Color::Green)), None)
             } else {
                 // Not running -- always show as idle regardless of JSONL state
                 let status = Span::styled("\u{25cb} ", Style::default().fg(Color::DarkGray));
