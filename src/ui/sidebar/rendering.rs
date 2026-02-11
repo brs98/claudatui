@@ -666,7 +666,10 @@ fn render_group_list_items(
             // regardless of the file-based status
             let is_running = ctx.running_sessions.contains(&conv.session_id);
             let (status_indicator, archive_indicator) = if is_running {
-                (Span::styled("\u{25cf} ", Style::default().fg(Color::Green)), None)
+                (
+                    Span::styled("\u{25cf} ", Style::default().fg(Color::Green)),
+                    None,
+                )
             } else {
                 // Not running -- always show as idle regardless of JSONL state
                 let status = Span::styled("\u{25cb} ", Style::default().fg(Color::DarkGray));
