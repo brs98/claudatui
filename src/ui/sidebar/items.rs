@@ -55,6 +55,11 @@ pub fn build_sidebar_items(
                 continue;
             }
 
+            // Skip projects where all conversations are hidden by current filters
+            if !project_has_visible_conversations(groups, ctx) {
+                continue;
+            }
+
             items.push(SidebarItem::ProjectHeader {
                 project_key: project_key.clone(),
                 name: project_name.clone(),
@@ -90,12 +95,11 @@ pub fn build_sidebar_items(
                 .map(|(_, _, g)| visible_group_count(g, ctx))
                 .sum();
 
-            // When hide_inactive is on, only show OtherHeader if at least one
-            // "other" group has active content (avoids empty header).
-            let show_other = !ctx.hide_inactive
-                || all_other_groups.iter().any(|g| {
-                    group_has_active_content(g, ctx.running_sessions, ctx.ephemeral_sessions)
-                });
+            // Only show OtherHeader if at least one "other" project has visible
+            // conversations (accounts for archive filter and hide_inactive).
+            let show_other = other_projects
+                .iter()
+                .any(|(_, _, groups)| project_has_visible_conversations(groups, ctx));
 
             if show_other {
                 items.push(SidebarItem::OtherHeader {
@@ -112,6 +116,11 @@ pub fn build_sidebar_items(
                                 ctx.ephemeral_sessions,
                             )
                         {
+                            continue;
+                        }
+
+                        // Skip projects where all conversations are hidden by current filters
+                        if !project_has_visible_conversations(groups, ctx) {
                             continue;
                         }
 
@@ -156,6 +165,11 @@ pub fn build_sidebar_items(
                 continue;
             }
 
+            // Skip projects where all conversations are hidden by current filters
+            if !project_has_visible_conversations(groups, ctx) {
+                continue;
+            }
+
             items.push(SidebarItem::ProjectHeader {
                 project_key: project_key.clone(),
                 name: project_name.clone(),
@@ -178,8 +192,8 @@ pub fn build_sidebar_items(
         }
     }
 
-    // Remove empty ProjectHeaders when text filter or hide_inactive is active
-    if has_text_filter || ctx.hide_inactive {
+    // Remove empty ProjectHeaders when text filter, hide_inactive, or archive filter is active
+    if has_text_filter || ctx.hide_inactive || ctx.archive_filter != ArchiveFilter::All {
         // Already handled AddWorkspace above (not inserted when has_text_filter or hide_inactive)
         // Remove ProjectHeaders that have no children following them
         remove_empty_headers(&mut items);
@@ -465,6 +479,27 @@ fn render_group_items(
             }
         }
     }
+}
+
+/// Check if a project has any conversations visible under the current filters
+/// (archive filter, hide_inactive, running sessions, plan implementation hiding).
+fn project_has_visible_conversations(groups: &[&ConversationGroup], ctx: &SidebarContext) -> bool {
+    groups.iter().any(|group| {
+        let group_has_running_parent = group
+            .conversations()
+            .iter()
+            .any(|c| !c.is_plan_implementation && ctx.running_sessions.contains(&c.session_id));
+
+        group.conversations().iter().any(|conv| {
+            !is_hidden_plan_implementation(conv, ctx.running_sessions, group_has_running_parent)
+                && should_show_conversation(
+                    conv,
+                    ctx.archive_filter,
+                    ctx.running_sessions,
+                    ctx.hide_inactive,
+                )
+        })
+    })
 }
 
 /// Count how many groups are visible after applying hide_inactive filtering.
