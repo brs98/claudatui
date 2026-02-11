@@ -596,11 +596,27 @@ impl App {
             self.prev_jsonl_sizes
                 .insert(session_id.to_string(), current_size);
 
+            // Reverse-lookup: find the PTY session ID for this Claude session ID
+            // so we can query the session manager for PTY output activity.
+            let pty_session_id: Option<String> = self
+                .session_to_claude_id
+                .iter()
+                .find(|(_, cid)| cid.as_deref() == Some(session_id))
+                .map(|(sid, _)| sid.clone());
+
             if status == ConversationStatus::WaitingForInput {
-                if let Some(last_growth) = self.last_jsonl_growth.get(session_id) {
-                    if last_growth.elapsed() < SETTLE_DURATION {
-                        status = ConversationStatus::Active;
-                    }
+                let jsonl_recent = self
+                    .last_jsonl_growth
+                    .get(session_id)
+                    .is_some_and(|t| t.elapsed() < SETTLE_DURATION);
+
+                let pty_recent = pty_session_id
+                    .as_deref()
+                    .and_then(|pid| self.session_manager.last_output_time(pid))
+                    .is_some_and(|t| t.elapsed() < SETTLE_DURATION);
+
+                if jsonl_recent || pty_recent {
+                    status = ConversationStatus::Active;
                 }
             }
 
