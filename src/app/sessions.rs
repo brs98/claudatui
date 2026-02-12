@@ -675,6 +675,12 @@ impl App {
             return;
         }
 
+        // Save currently selected session ID before rebuilding
+        let selected_sid = self
+            .mosaic_state_cache
+            .get(self.mosaic_selected)
+            .map(|(sid, _, _)| sid.clone());
+
         let ids = self.active_pty_session_ids_ordered();
         self.mosaic_state_cache = ids
             .iter()
@@ -685,9 +691,23 @@ impl App {
             })
             .collect();
 
-        // Clamp selection if sessions were removed
+        // Restore selection by session ID, or clamp if session is gone
         if !self.mosaic_state_cache.is_empty() {
-            self.mosaic_selected = self.mosaic_selected.min(self.mosaic_state_cache.len() - 1);
+            if let Some(ref sid) = selected_sid {
+                if let Some(new_idx) = self
+                    .mosaic_state_cache
+                    .iter()
+                    .position(|(cache_sid, _, _)| cache_sid == sid)
+                {
+                    self.mosaic_selected = new_idx;
+                } else {
+                    self.mosaic_selected =
+                        self.mosaic_selected.min(self.mosaic_state_cache.len() - 1);
+                }
+            } else {
+                self.mosaic_selected =
+                    self.mosaic_selected.min(self.mosaic_state_cache.len() - 1);
+            }
         } else {
             self.mosaic_selected = 0;
         }
