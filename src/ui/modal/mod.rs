@@ -5,12 +5,14 @@ use std::path::PathBuf;
 use crossterm::event::KeyEvent;
 
 pub mod new_project;
+pub mod profile;
 pub mod search;
 pub mod workspace;
 pub mod worktree;
 pub mod worktree_search;
 
 pub use new_project::{NewProjectModal, NewProjectModalState, NewProjectTab};
+pub use profile::{ProfileModal, ProfileModalState};
 pub use search::{SearchKeyResult, SearchModal, SearchModalState};
 pub use workspace::{WorkspaceModal, WorkspaceModalState};
 pub use worktree::{WorktreeModal, WorktreeModalState};
@@ -43,6 +45,14 @@ pub enum ModalKeyResult {
     WorkspaceAdded(String),
     /// A workspace directory was removed (by index).
     WorkspaceRemoved(usize),
+    /// A new profile was created.
+    ProfileCreated(String),
+    /// A profile was renamed.
+    ProfileRenamed { index: usize, new_name: String },
+    /// A profile was deleted (by index).
+    ProfileDeleted(usize),
+    /// A profile was activated (by index).
+    ProfileActivated(usize),
 }
 
 /// Trait for unified modal key dispatch.

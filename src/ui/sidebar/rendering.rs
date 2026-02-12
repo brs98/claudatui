@@ -193,11 +193,15 @@ fn build_list_items(
         }
     };
 
-    // WorkspaceSectionHeader always at top
+    // WorkspaceSectionHeader always at top — show profile name if active
+    let header_text = match ctx.active_profile_name {
+        Some(name) => name.to_string(),
+        None => "Workspaces".to_string(),
+    };
     let line_num = format_relative_line_number(current_index, selected_index);
     items.push(ListItem::new(Line::from(vec![
         Span::styled(line_num, Style::default().fg(Color::DarkGray)),
-        Span::styled("Workspaces", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(header_text, Style::default().add_modifier(Modifier::BOLD)),
     ])));
     current_index += 1;
 

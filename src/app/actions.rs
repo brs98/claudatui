@@ -654,25 +654,185 @@ impl App {
     }
 
     // =========================================================================
+    // Profile Methods
+    // =========================================================================
+
+    /// Switch the active profile. `None` means "All" mode (no filtering).
+    pub fn switch_profile(&mut self, idx: Option<usize>) {
+        match idx {
+            Some(i) => {
+                if i >= self.config.profiles.len() {
+                    self.toast_error("Invalid profile index");
+                    return;
+                }
+                self.active_profile = Some(i);
+                let name = &self.config.profiles[i].name;
+                self.toast_success(format!("Profile: {}", name));
+            }
+            None => {
+                self.active_profile = None;
+                self.toast_success("Switched to All");
+            }
+        }
+    }
+
+    /// Open the profile management modal.
+    pub fn open_profile_modal(&mut self) {
+        let profile_names: Vec<String> = self.config.profiles.iter().map(|p| p.name.clone()).collect();
+        let state = crate::ui::modal::ProfileModalState::new(profile_names, self.active_profile);
+        self.modal_state = ModalState::Profile(Box::new(state));
+        self.input_mode = InputMode::Insert;
+    }
+
+    /// Create a new profile from the modal.
+    pub fn create_profile(&mut self, name: &str) {
+        self.config.profiles.push(crate::config::ProfileEntry {
+            name: name.to_string(),
+            workspaces: Vec::new(),
+        });
+        self.save_config_silent();
+        self.which_key_config
+            .rebuild_with_profiles(&self.config.profiles);
+
+        // Update modal state to reflect the change
+        if let ModalState::Profile(ref mut state) = self.modal_state {
+            state.profiles.push(name.to_string());
+            state.selected = state.profiles.len() - 1;
+            state.list_state.select(Some(state.selected));
+            state.mode = crate::ui::modal::profile::ProfileModalMode::List;
+            state.input_purpose = None;
+            state.input_buffer.clear();
+            state.cursor_pos = 0;
+            state.error_message = None;
+        }
+
+        self.toast_success(format!("Profile created: {}", name));
+    }
+
+    /// Rename an existing profile from the modal.
+    pub fn rename_profile(&mut self, index: usize, new_name: &str) {
+        if index >= self.config.profiles.len() {
+            return;
+        }
+        self.config.profiles[index].name = new_name.to_string();
+        self.save_config_silent();
+        self.which_key_config
+            .rebuild_with_profiles(&self.config.profiles);
+
+        // Update modal state
+        if let ModalState::Profile(ref mut state) = self.modal_state {
+            if index < state.profiles.len() {
+                state.profiles[index] = new_name.to_string();
+            }
+            state.mode = crate::ui::modal::profile::ProfileModalMode::List;
+            state.input_purpose = None;
+            state.input_buffer.clear();
+            state.cursor_pos = 0;
+            state.error_message = None;
+        }
+
+        self.toast_success(format!("Profile renamed to: {}", new_name));
+    }
+
+    /// Delete a profile from the modal.
+    pub fn delete_profile(&mut self, index: usize) {
+        if index >= self.config.profiles.len() {
+            return;
+        }
+        let removed_name = self.config.profiles.remove(index).name;
+        self.save_config_silent();
+
+        // Handle active profile index shift
+        if let Some(active) = self.active_profile {
+            if index == active {
+                // Deleted the active profile — switch to "All" mode
+                self.active_profile = None;
+            } else if index < active {
+                // Deleted before active — shift index down
+                self.active_profile = Some(active - 1);
+            }
+            // index > active — no change needed
+        }
+
+        // Rebuild which-key (may clear profile entries if list is now empty)
+        if self.config.has_profiles() {
+            self.which_key_config
+                .rebuild_with_profiles(&self.config.profiles);
+        } else {
+            // No profiles left — reset to default commands
+            self.which_key_config = crate::input::which_key::WhichKeyConfig::new();
+        }
+
+        // Update modal state
+        if let ModalState::Profile(ref mut state) = self.modal_state {
+            if index < state.profiles.len() {
+                state.profiles.remove(index);
+            }
+            // Update active marker
+            state.active_profile = self.active_profile;
+            // Clamp selection
+            if state.profiles.is_empty() {
+                state.selected = 0;
+                state.list_state.select(None);
+            } else {
+                state.selected = state.selected.min(state.profiles.len() - 1);
+                state.list_state.select(Some(state.selected));
+            }
+        }
+
+        self.toast_success(format!("Profile deleted: {}", removed_name));
+    }
+
+    /// Activate a profile from the modal and close it.
+    pub fn activate_profile_from_modal(&mut self, index: usize) {
+        self.close_modal();
+        self.switch_profile(Some(index));
+    }
+
+    // =========================================================================
     // Workspace Methods
     // =========================================================================
 
+    /// Get a mutable reference to the active workspace list.
+    /// If a profile is active, returns that profile's workspaces.
+    /// If no profiles are defined, returns legacy workspaces.
+    fn active_workspace_list(&self) -> &[String] {
+        if let Some(idx) = self.active_profile {
+            if let Some(profile) = self.config.profiles.get(idx) {
+                return &profile.workspaces;
+            }
+        }
+        &self.config.workspaces
+    }
+
     /// Open the workspace management modal.
     pub fn open_workspace_modal(&mut self) {
-        let current_workspaces = self.config.workspaces.clone();
+        let current_workspaces = self.active_workspace_list().to_vec();
         let state = WorkspaceModalState::new(current_workspaces);
         self.modal_state = ModalState::Workspace(Box::new(state));
         self.input_mode = InputMode::Insert;
     }
 
-    /// Add a workspace directory to config.
+    /// Add a workspace directory to the active profile (or legacy workspaces).
     pub fn add_workspace(&mut self, path: &str) {
-        if self.config.workspaces.contains(&path.to_string()) {
+        let workspaces = if let Some(idx) = self.active_profile {
+            &mut self.config.profiles[idx].workspaces
+        } else {
+            &mut self.config.workspaces
+        };
+
+        if workspaces.contains(&path.to_string()) {
             self.toast_warning("Already a workspace");
             return;
         }
-        self.config.workspaces.push(path.to_string());
+        workspaces.push(path.to_string());
         self.save_config_silent();
+
+        // Rebuild which-key menu if profiles changed
+        if self.active_profile.is_some() {
+            self.which_key_config
+                .rebuild_with_profiles(&self.config.profiles);
+        }
 
         // Update the modal state to reflect the change
         if let ModalState::Workspace(ref mut state) = self.modal_state {
@@ -689,13 +849,25 @@ impl App {
         self.toast_success(format!("Workspace added: {}", path));
     }
 
-    /// Remove a workspace directory from config by index.
+    /// Remove a workspace directory from the active profile (or legacy workspaces) by index.
     pub fn remove_workspace(&mut self, index: usize) {
-        if index >= self.config.workspaces.len() {
+        let workspaces = if let Some(idx) = self.active_profile {
+            &mut self.config.profiles[idx].workspaces
+        } else {
+            &mut self.config.workspaces
+        };
+
+        if index >= workspaces.len() {
             return;
         }
-        let removed = self.config.workspaces.remove(index);
+        let removed = workspaces.remove(index);
         self.save_config_silent();
+
+        // Rebuild which-key menu if profiles changed
+        if self.active_profile.is_some() {
+            self.which_key_config
+                .rebuild_with_profiles(&self.config.profiles);
+        }
 
         // Update the modal state to reflect the change
         if let ModalState::Workspace(ref mut state) = self.modal_state {

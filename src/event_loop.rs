@@ -19,7 +19,8 @@ use crate::handlers::mouse::handle_mouse_event;
 use crate::input::InputMode;
 use crate::ui::layout::create_layout_with_help_config;
 use crate::ui::modal::{
-    NewProjectModal, SearchModal, WorkspaceModal, WorktreeModal, WorktreeSearchModal,
+    NewProjectModal, ProfileModal, SearchModal, WorkspaceModal, WorktreeModal,
+    WorktreeSearchModal,
 };
 use crate::ui::mosaic::MosaicView;
 use crate::ui::sidebar::{Sidebar, SidebarContext};
@@ -139,6 +140,8 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
     let filter_query = app.sidebar_state.filter_query.clone();
 
     // Build sidebar context with shared parameters
+    let effective_workspaces = app.effective_workspaces();
+    let profile_name = app.active_profile_name().map(str::to_string);
     let sidebar_ctx = SidebarContext {
         groups: &app.groups,
         running_sessions: &running_sessions,
@@ -148,7 +151,8 @@ fn draw_ui(f: &mut Frame, app: &mut App, hot_reload_status: &HotReloadStatus) {
         filter_query: &filter_query,
         filter_active: app.sidebar_state.filter_active,
         filter_cursor_pos: app.sidebar_state.filter_cursor_pos,
-        workspaces: &app.config.workspaces,
+        workspaces: &effective_workspaces,
+        active_profile_name: profile_name.as_deref(),
     };
 
     // Draw sidebar with running session indicators and ephemeral sessions
@@ -263,6 +267,11 @@ fn draw_modal(f: &mut Frame, app: &mut App) {
         crate::app::ModalState::Workspace(ref mut state) => {
             let area = WorkspaceModal::calculate_area(f.area());
             let modal = WorkspaceModal::new(state);
+            f.render_widget(modal, area);
+        }
+        crate::app::ModalState::Profile(ref state) => {
+            let area = ProfileModal::calculate_area(f.area());
+            let modal = ProfileModal::new(state);
             f.render_widget(modal, area);
         }
     }

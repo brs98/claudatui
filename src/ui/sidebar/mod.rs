@@ -39,6 +39,8 @@ pub struct SidebarContext<'a> {
     pub filter_cursor_pos: usize,
     /// Workspace directory prefixes for filtering
     pub workspaces: &'a [String],
+    /// Name of the active profile (None = "All" mode or no profiles configured)
+    pub active_profile_name: Option<&'a str>,
 }
 
 /// Archive filter modes for the sidebar

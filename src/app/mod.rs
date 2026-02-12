@@ -29,8 +29,8 @@ use crate::input::{InputMode, LeaderState};
 use crate::search::SearchEngine;
 use crate::session::{ScreenState, SessionManager, SessionState};
 use crate::ui::modal::{
-    Modal, NewProjectModalState, SearchModalState, WorkspaceModalState, WorktreeModalState,
-    WorktreeSearchModalState,
+    Modal, NewProjectModalState, ProfileModalState, SearchModalState, WorkspaceModalState,
+    WorktreeModalState, WorktreeSearchModalState,
 };
 use crate::ui::sidebar::{
     build_sidebar_items, group_has_active_content, SidebarContext, SidebarItem, SidebarState,
@@ -57,6 +57,8 @@ pub enum ModalState {
     WorktreeSearch(Box<WorktreeSearchModalState>),
     /// Workspace management modal
     Workspace(Box<WorkspaceModalState>),
+    /// Profile management modal
+    Profile(Box<ProfileModalState>),
 }
 
 impl ModalState {
@@ -69,6 +71,7 @@ impl ModalState {
             ModalState::Worktree(state) => Some(state.as_mut()),
             ModalState::WorktreeSearch(state) => Some(state.as_mut()),
             ModalState::Workspace(state) => Some(state.as_mut()),
+            ModalState::Profile(state) => Some(state.as_mut()),
         }
     }
 }
@@ -237,6 +240,8 @@ pub struct App {
     pub mosaic_selected: usize,
     /// Cached session states for mosaic rendering (session_id, display_name, state)
     pub mosaic_state_cache: Vec<(String, String, SessionState)>,
+    /// Active profile index (into `config.profiles`), or None for "All" mode
+    pub active_profile: Option<usize>,
 }
 
 impl App {
@@ -301,7 +306,14 @@ impl App {
             help_menu_open: false,
             mosaic_selected: 0,
             mosaic_state_cache: Vec::new(),
+            active_profile: None,
         };
+
+        // Build dynamic which-key profile submenu if profiles are configured
+        if app.config.has_profiles() {
+            app.which_key_config
+                .rebuild_with_profiles(&app.config.profiles);
+        }
 
         app.load_conversations_full()?;
         app.check_auto_archive();
@@ -377,9 +389,38 @@ impl App {
             .collect()
     }
 
+    /// Compute the effective workspace list based on profile state.
+    ///
+    /// - If `profiles` is empty and legacy `workspaces` is non-empty → legacy workspaces
+    /// - If `active_profile` is `None` → empty (= "All" mode, no workspace/other split)
+    /// - If `active_profile` is `Some(idx)` → that profile's workspaces
+    pub fn effective_workspaces(&self) -> Vec<String> {
+        if self.config.profiles.is_empty() {
+            // Legacy: no profiles defined, use flat workspaces list
+            return self.config.workspaces.clone();
+        }
+        match self.active_profile {
+            None => Vec::new(), // "All" mode — flat list, no split
+            Some(idx) => self
+                .config
+                .profiles
+                .get(idx)
+                .map(|p| p.workspaces.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Get the name of the active profile, if any.
+    pub fn active_profile_name(&self) -> Option<&str> {
+        self.active_profile
+            .and_then(|idx| self.config.profiles.get(idx))
+            .map(|p| p.name.as_str())
+    }
+
     /// Get the flattened sidebar items for navigation
     pub fn sidebar_items(&self) -> Vec<SidebarItem> {
         let running = self.running_session_ids();
+        let effective = self.effective_workspaces();
         let ctx = SidebarContext {
             groups: &self.groups,
             running_sessions: &running,
@@ -389,7 +430,8 @@ impl App {
             filter_query: &self.sidebar_state.filter_query,
             filter_active: self.sidebar_state.filter_active,
             filter_cursor_pos: self.sidebar_state.filter_cursor_pos,
-            workspaces: &self.config.workspaces,
+            workspaces: &effective,
+            active_profile_name: self.active_profile_name(),
         };
         build_sidebar_items(
             &ctx,

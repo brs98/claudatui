@@ -4,6 +4,8 @@
 //! Emacs which-key or nvim-which-key, showing available commands as
 //! the user presses leader key sequences.
 
+use crate::config::ProfileEntry;
+
 /// Actions that can be triggered via the leader key menu
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LeaderAction {
@@ -44,6 +46,14 @@ pub enum LeaderAction {
     WorktreeSearch,
     /// Open workspace management modal
     ManageWorkspaces,
+
+    // Profiles
+    /// Switch to a specific profile by index
+    SwitchProfile(usize),
+    /// Switch to "All" mode (no profile filtering)
+    SwitchProfileAll,
+    /// Open profile management modal
+    ManageProfiles,
 
     // View
     /// Toggle mosaic view (all active sessions in a grid)
@@ -145,11 +155,10 @@ impl WhichKeyConfig {
             LeaderCommand::submenu(
                 'p',
                 "project",
-                vec![LeaderCommand::action(
-                    'p',
-                    "workspaces",
-                    LeaderAction::ManageWorkspaces,
-                )],
+                vec![
+                    LeaderCommand::action('p', "workspaces", LeaderAction::ManageWorkspaces),
+                    LeaderCommand::action('m', "manage profiles", LeaderAction::ManageProfiles),
+                ],
             ),
             // View submenu
             LeaderCommand::submenu(
@@ -201,6 +210,49 @@ impl WhichKeyConfig {
             }) => LeaderKeyResult::Execute(*action),
             Some(cmd) if !cmd.subcommands.is_empty() => LeaderKeyResult::Submenu,
             _ => LeaderKeyResult::Cancel, // Invalid key
+        }
+    }
+
+    /// Rebuild the 'p' (project) submenu to include profile switching entries.
+    ///
+    /// When profiles are defined, the submenu becomes:
+    ///   `a` → All (switch to unfiltered mode)
+    ///   `1` → first profile name
+    ///   `2` → second profile name
+    ///   ...
+    ///   `p` → workspaces (manage workspace dirs)
+    pub fn rebuild_with_profiles(&mut self, profiles: &[ProfileEntry]) {
+        let mut submenu = vec![LeaderCommand::action(
+            'a',
+            "all",
+            LeaderAction::SwitchProfileAll,
+        )];
+
+        // Add numbered entries for each profile (1-9)
+        for (i, profile) in profiles.iter().take(9).enumerate() {
+            let key = char::from_digit((i + 1) as u32, 10).unwrap_or('0');
+            submenu.push(LeaderCommand::action(
+                key,
+                profile.name.to_lowercase(),
+                LeaderAction::SwitchProfile(i),
+            ));
+        }
+
+        // Keep workspace management and profile management at the end
+        submenu.push(LeaderCommand::action(
+            'p',
+            "workspaces",
+            LeaderAction::ManageWorkspaces,
+        ));
+        submenu.push(LeaderCommand::action(
+            'm',
+            "manage profiles",
+            LeaderAction::ManageProfiles,
+        ));
+
+        // Replace the 'p' submenu in root commands
+        if let Some(cmd) = self.commands.iter_mut().find(|c| c.key == 'p') {
+            cmd.subcommands = submenu;
         }
     }
 

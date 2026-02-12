@@ -705,8 +705,7 @@ impl App {
                         self.mosaic_selected.min(self.mosaic_state_cache.len() - 1);
                 }
             } else {
-                self.mosaic_selected =
-                    self.mosaic_selected.min(self.mosaic_state_cache.len() - 1);
+                self.mosaic_selected = self.mosaic_selected.min(self.mosaic_state_cache.len() - 1);
             }
         } else {
             self.mosaic_selected = 0;

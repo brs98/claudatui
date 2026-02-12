@@ -8,6 +8,19 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// A named profile containing a set of workspace directories.
+///
+/// Profiles let you scope the sidebar to a subset of your projects.
+/// When a profile is active, only its workspaces appear prominently;
+/// everything else is collapsed under "Other."
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileEntry {
+    /// Human-readable profile name (e.g., "Personal", "Work")
+    pub name: String,
+    /// Workspace directory prefixes for this profile
+    pub workspaces: Vec<String>,
+}
+
 /// Main configuration struct
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -19,12 +32,18 @@ pub struct Config {
     #[serde(default = "default_dangerous_mode")]
     pub dangerous_mode: bool,
 
-    /// Workspace directories for sidebar filtering.
-    /// When non-empty, only projects under these paths appear as primary groups;
-    /// everything else is placed in a collapsible "Other" section.
-    /// Uses prefix matching (e.g., "/Users/brandon/work" includes all projects under that tree).
+    /// Workspace directories for sidebar filtering (legacy).
+    /// When non-empty and no profiles are defined, only projects under these paths
+    /// appear as primary groups; everything else is placed in a collapsible "Other" section.
+    /// Ignored when `profiles` is non-empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<String>,
+
+    /// Named profiles, each containing a set of workspace directories.
+    /// When non-empty, takes precedence over `workspaces`.
+    /// The active profile is selected at runtime; defaults to "All" (no filtering).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<ProfileEntry>,
 }
 
 fn default_dangerous_mode() -> bool {
@@ -37,6 +56,7 @@ impl Default for Config {
             layout: LayoutConfig::default(),
             dangerous_mode: true,
             workspaces: Vec::new(),
+            profiles: Vec::new(),
         }
     }
 }
@@ -78,9 +98,14 @@ impl Config {
         Ok(())
     }
 
-    /// Check if any workspaces are configured
+    /// Check if any workspaces are configured (legacy path)
     pub fn has_workspaces(&self) -> bool {
         !self.workspaces.is_empty()
+    }
+
+    /// Check if any profiles are defined
+    pub fn has_profiles(&self) -> bool {
+        !self.profiles.is_empty()
     }
 
     /// Check if a project path falls under any configured workspace directory (prefix match)
@@ -249,5 +274,63 @@ mod tests {
             ..Config::default()
         };
         assert!(config.has_workspaces());
+    }
+
+    #[test]
+    fn profiles_empty_by_default_and_skipped_in_serialization() {
+        let config = Config::default();
+        assert!(!config.has_profiles());
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("profiles"));
+    }
+
+    #[test]
+    fn profiles_roundtrip_through_json() {
+        let config = Config {
+            profiles: vec![
+                ProfileEntry {
+                    name: "Personal".to_string(),
+                    workspaces: vec!["/Users/brandon/personal".to_string()],
+                },
+                ProfileEntry {
+                    name: "Work".to_string(),
+                    workspaces: vec!["/Users/brandon/work".to_string()],
+                },
+            ],
+            ..Config::default()
+        };
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        assert!(json.contains("profiles"));
+        assert!(json.contains("Personal"));
+        assert!(json.contains("Work"));
+        let parsed: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.profiles.len(), 2);
+        assert_eq!(parsed.profiles[0].name, "Personal");
+        assert_eq!(parsed.profiles[1].name, "Work");
+        assert_eq!(
+            parsed.profiles[0].workspaces,
+            vec!["/Users/brandon/personal"]
+        );
+    }
+
+    #[test]
+    fn has_profiles_returns_true_when_configured() {
+        let config = Config {
+            profiles: vec![ProfileEntry {
+                name: "Test".to_string(),
+                workspaces: vec!["/test".to_string()],
+            }],
+            ..Config::default()
+        };
+        assert!(config.has_profiles());
+    }
+
+    #[test]
+    fn backward_compat_old_config_without_profiles_deserializes() {
+        let json = r#"{"dangerous_mode": true, "workspaces": ["/old/path"]}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.has_workspaces());
+        assert!(!config.has_profiles());
+        assert_eq!(config.workspaces, vec!["/old/path"]);
     }
 }

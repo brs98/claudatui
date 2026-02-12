@@ -42,6 +42,18 @@ pub(crate) fn forward_key_to_modal(app: &mut App, key: KeyEvent) -> Result<()> {
         ModalKeyResult::WorkspaceRemoved(idx) => {
             app.remove_workspace(idx);
         }
+        ModalKeyResult::ProfileCreated(name) => {
+            app.create_profile(&name);
+        }
+        ModalKeyResult::ProfileRenamed { index, new_name } => {
+            app.rename_profile(index, &new_name);
+        }
+        ModalKeyResult::ProfileDeleted(idx) => {
+            app.delete_profile(idx);
+        }
+        ModalKeyResult::ProfileActivated(idx) => {
+            app.activate_profile_from_modal(idx);
+        }
     }
     Ok(())
 }

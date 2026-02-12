@@ -300,6 +300,15 @@ pub(crate) fn execute_leader_action(app: &mut App, action: LeaderAction) -> Resu
         LeaderAction::ManageWorkspaces => {
             app.open_workspace_modal();
         }
+        LeaderAction::SwitchProfile(idx) => {
+            app.switch_profile(Some(idx));
+        }
+        LeaderAction::SwitchProfileAll => {
+            app.switch_profile(None);
+        }
+        LeaderAction::ManageProfiles => {
+            app.open_profile_modal();
+        }
         LeaderAction::ToggleMosaic => {
             app.toggle_mosaic_view();
         }
@@ -354,11 +363,18 @@ pub(crate) fn handle_modal_insert_with_escape_seq(
     app: &mut App,
     key: KeyEvent,
 ) -> Result<KeyAction> {
-    // Escape handling: WorktreeSearch Phase 2 goes back to Phase 1 instead of closing
+    // Escape handling: some modals have sub-modes where Esc should not close the modal
     if key.code == KeyCode::Esc {
+        // WorktreeSearch Phase 2: Esc goes back to Phase 1
         if let crate::app::ModalState::WorktreeSearch(ref state) = app.modal_state {
             if state.phase == crate::ui::modal::worktree_search::WorktreeSearchPhase::BranchInput {
-                // Forward Esc to the modal so it can transition back to Phase 1
+                forward_key_to_modal(app, key)?;
+                return Ok(KeyAction::Continue);
+            }
+        }
+        // Profile modal Input mode: Esc cancels back to List mode
+        if let crate::app::ModalState::Profile(ref state) = app.modal_state {
+            if state.mode == crate::ui::modal::profile::ProfileModalMode::Input {
                 forward_key_to_modal(app, key)?;
                 return Ok(KeyAction::Continue);
             }
