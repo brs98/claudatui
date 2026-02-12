@@ -196,7 +196,7 @@ pub fn build_sidebar_items(
     if has_text_filter || ctx.hide_inactive || ctx.archive_filter != ArchiveFilter::All {
         // Already handled AddWorkspace above (not inserted when has_text_filter or hide_inactive)
         // Remove ProjectHeaders that have no children following them
-        remove_empty_headers(&mut items);
+        remove_empty_headers(&mut items, collapsed_projects, other_collapsed);
     }
 
     items
@@ -224,14 +224,32 @@ fn group_by_project<'a>(
 
 /// Remove structural header items (ProjectHeader, OtherHeader) that have no child items
 /// following them (i.e., the next item is another header, AddWorkspace, SectionControl,
-/// or end-of-list).
-fn remove_empty_headers(items: &mut Vec<SidebarItem>) {
+/// or end-of-list). Headers that are intentionally collapsed by the user are preserved.
+fn remove_empty_headers(
+    items: &mut Vec<SidebarItem>,
+    collapsed_projects: &HashSet<String>,
+    other_collapsed: bool,
+) {
     let mut i = 0;
     while i < items.len() {
         if matches!(
             items[i],
             SidebarItem::ProjectHeader { .. } | SidebarItem::OtherHeader { .. }
         ) {
+            // Keep headers the user intentionally collapsed — they should remain
+            // visible with a collapsed indicator, not be removed.
+            let is_intentionally_collapsed = match &items[i] {
+                SidebarItem::ProjectHeader { project_key, .. } => {
+                    collapsed_projects.contains(project_key)
+                }
+                SidebarItem::OtherHeader { .. } => other_collapsed,
+                _ => false,
+            };
+            if is_intentionally_collapsed {
+                i += 1;
+                continue;
+            }
+
             let next_is_empty = if i + 1 >= items.len() {
                 true
             } else {
